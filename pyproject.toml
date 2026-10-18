@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manga-live-companion"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+dependencies = ["Pillow>=10.4,<13", "numpy>=1.26,<3", "keyring>=25,<26"]
+
+[project.optional-dependencies]
+ocr = ["manga-ocr==0.1.14", "transformers>=4.40,<5", "torch>=2.4,<3", "opencv-python-headless>=4.10,<5"]
+detector = ["paddleocr>=3.3,<4", "paddlepaddle>=3.2,<4"]
+dev = ["pytest>=8,<9", "pyinstaller>=6.16,<7"]
+
+[tool.setuptools.packages.find]
+where = ["companion"]
+
+[tool.pytest.ini_options]
+pythonpath = ["companion"]
+testpaths = ["tests/python"]

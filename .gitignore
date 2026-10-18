@@ -1,0 +1,32 @@
+# dependencies & builds
+node_modules/
+.venv/
+dist/
+build/
+.output/
+.wxt/
+*.tsbuildinfo
+
+# large local runtimes, models and private evidence (never commit)
+runtime/
+models/
+artifacts/
+.private/
+*.gguf
+*.onnx
+*.db*
+
+# secrets
+.env*
+!*.example
+
+# python / test temp
+__pycache__/
+.pytest_cache/
+.pytest-temp-*/
+.pytest-run-*/
+*.pyc
+
+# tool state
+.omc/
+ProjectsLive-translation-package-qa-*/

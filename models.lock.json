@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "ocr": {
+    "repo": "kha-white/manga-ocr-base", "revision": "aa6573bd10b0d446cbf622e29c3e084914df9741", "license": "Apache-2.0",
+    "files": {
+      "config.json": {"gitBlob": "deb78906462c7ea5a5b891c7873461c5fed28d0d", "bytes": 77546},
+      "preprocessor_config.json": {"gitBlob": "b7414e73cf93e2818ed2c82d3d7bfc0d85991c13", "bytes": 228},
+      "pytorch_model.bin": {"sha256": "c63e0bb5b3ff798c5991de18a8e0956c7ee6d1563aca6729029815eda6f5c2eb", "bytes": 444135475},
+      "special_tokens_map.json": {"gitBlob": "e7b0375001f109a6b8873d756ad4f7bbb15fbaa5", "bytes": 112},
+      "tokenizer_config.json": {"gitBlob": "a1f0a30b78d408adee24357ac88c51c65b4eaed6", "bytes": 486},
+      "vocab.txt": {"gitBlob": "c2bd4e463e91d61f0c6e9a0cdaa221a50384c4dc", "bytes": 24072}
+    }
+  },
+  "detector": {
+    "repo": "PaddlePaddle/PP-OCRv5_mobile_det", "revision": "0d63e78e2b680928f6b1747d76a08db6e645efb7", "license": "Apache-2.0",
+    "files": {
+      "inference.json": {"gitBlob": "6cd678f39460a27372f8fe570e4e12e7a383418f", "bytes": 229777},
+      "inference.pdiparams": {"sha256": "afa1820cb16c1fd0dad589d0f8b389139061c1ef6d68019685fd07be997dda5b", "bytes": 4692937},
+      "inference.yml": {"gitBlob": "579d10695d2dd6e85c5ecba02d151ae5c077aa49", "bytes": 903}
+    }
+  },
+  "translation": {
+    "repo": "tencent/Hy-MT2-1.8B-GGUF", "revision": "a0c709d9fac510f2c807aa3af52872340dc37a4a", "license": "Apache-2.0",
+    "files": {"Hy-MT2-1.8B-Q6_K.gguf": {"sha256": "d98fe604dec1f28f58f80d7d560f7177e584d3b8e5835862687660e5ff97cb40", "bytes": 1474785120}}
+  },
+  "summarizer": {
+    "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF", "revision": "a06e946bb6b655725eafa393f4a9745d460374c9", "license": "Apache-2.0",
+    "files": {"Qwen3-4B-Instruct-2507-Q4_K_M.gguf": {"sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597", "bytes": 2497281120}}
+  },
+  "translation-lite": {
+    "repo": "tencent/Hy-MT2-1.8B-GGUF", "revision": "a0c709d9fac510f2c807aa3af52872340dc37a4a", "license": "Apache-2.0",
+    "files": {"Hy-MT2-1.8B-Q4_K_M.gguf": {"sha256": "dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699", "bytes": 1133080448}}
+  },
+  "translation-quality-pilot": {
+    "repo": "tencent/Hy-MT2-7B-GGUF", "revision": "ab8472660ac61fac25f1af43fac2599d52a8a775", "license": "Apache-2.0",
+    "files": {"Hy-MT2-7B-Q4_K_M.gguf": {"sha256": "9f96256500f3fc1ab4d64336b58f52a949a95ad7516b0c229476eef782f9f77b", "bytes": 4624648896}}
+  }
+}
