@@ -1,0 +1,14 @@
+{
+  "name": "@lt/eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "detect": "tsx src/detect.ts",
+    "eval": "tsx src/bakeoff.ts"
+  },
+  "dependencies": {
+    "@lt/core": "*",
+    "@lt/server": "*"
+  }
+}

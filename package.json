@@ -1,24 +1,25 @@
 {
-  "name": "manga-live-translator",
-  "version": "0.1.0",
+  "name": "live-translation",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "tools/*"
+  ],
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
-    "test:ui": "node scripts/ui-qa.mjs",
-    "test:desktop": "node scripts/desktop-reader-qa.mjs",
-    "test:lettering": "node scripts/lettering-qa.mjs",
-    "test:art": "node scripts/art-lettering-qa.mjs",
-    "test:options": "node scripts/options-qa.mjs",
-    "test:connection": "node scripts/connection-qa.mjs",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "server": "npm -w @lt/server run dev",
+    "demo": "npm -w @lt/demo run build",
+    "eval": "npm -w @lt/eval run eval --",
+    "detect": "npm -w @lt/eval run detect --"
   },
-  "dependencies": { "react": "^19.2.0", "react-dom": "^19.2.0", "zod": "^4.1.0" },
   "devDependencies": {
-    "@types/chrome": "^0.1.0", "@types/node": "^24.0.0",
-    "@types/react": "^19.2.0", "@types/react-dom": "^19.2.0",
-    "esbuild": "^0.25.0", "playwright": "^1.56.0", "tsx": "^4.20.0", "typescript": "^5.9.0"
+    "@types/node": "^24.10.0",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.5"
   }
 }

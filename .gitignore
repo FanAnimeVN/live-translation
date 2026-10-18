@@ -30,3 +30,6 @@ __pycache__/
 # tool state
 .omc/
 ProjectsLive-translation-package-qa-*/
+
+# local caches redirected off the full C: drive
+.cache/
