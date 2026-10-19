@@ -1,5 +1,5 @@
 import type { PromptPart } from "@lt/core";
-import { env } from "./env";
+import { assertLocalUrl, env } from "./env";
 import { assertBudget, record } from "./ledger";
 import { estimateUsd, modelInfo } from "./models";
 
@@ -40,34 +40,52 @@ export async function streamChat(opts: {
   extra?: Record<string, unknown>;
   onText: (delta: string) => void;
 }): Promise<StreamStats> {
-  if (!env.openrouterKey) throw new ProviderError("OPENROUTER_API_KEY is missing in .env.local", 401, "no-key");
-  await assertBudget(estimateUsd(opts.model));
+  // "local/<name>": a model served on this machine (Ollama, LM Studio). No key, no credits,
+  // and never a request to another host.
+  const local = opts.model.startsWith("local/");
+  if (!local && !env.openrouterKey) throw new ProviderError("OPENROUTER_API_KEY is missing in .env.local", 401, "no-key");
+  if (!local) await assertBudget(estimateUsd(opts.model));
   const info = modelInfo(opts.model);
   // Explicit cache breakpoints for providers that need them (Anthropic, Gemini);
   // DeepSeek, GLM and Qwen cache identical prefixes automatically.
   const explicitCache = /^(anthropic|google)\//.test(opts.model);
   const cacheMark = explicitCache ? { cache_control: { type: "ephemeral" } } : {};
-  const body = {
-    model: opts.model,
-    stream: true,
-    max_tokens: opts.maxTokens ?? 6000,
-    ...(info.noSampling ? {} : { temperature: 0.2 }),
-    usage: { include: true },
-    provider: { data_collection: "deny", sort: opts.sort ?? "latency" },
-    ...info.extra,
-    ...opts.extra,
-    messages: [
-      { role: "system", content: explicitCache ? [{ type: "text", text: opts.system, ...cacheMark }] : opts.system },
-      {
-        role: "user",
-        content: opts.parts.map((p) =>
-          p.type === "text"
-            ? { type: "text", text: p.text, ...(p.cache ? cacheMark : {}) }
-            : { type: "image_url", image_url: { url: p.dataUrl } },
-        ),
-      },
-    ],
-  };
+  const body = local
+    ? {
+        model: opts.model.slice("local/".length),
+        stream: true,
+        stream_options: { include_usage: true },
+        max_tokens: opts.maxTokens ?? 6000,
+        temperature: 0.2,
+        messages: [
+          // Translation-only models (Hy-MT2) take their instruction in the user turn, no system prompt.
+          ...(opts.system ? [{ role: "system", content: opts.system }] : []),
+          { role: "user", content: opts.parts.map((p) => (p.type === "text" ? { type: "text", text: p.text } : { type: "image_url", image_url: { url: p.dataUrl } })) },
+        ],
+      }
+    : {
+        model: opts.model,
+        stream: true,
+        max_tokens: opts.maxTokens ?? 6000,
+        ...(info.noSampling ? {} : { temperature: 0.2 }),
+        usage: { include: true },
+        // Background work (text only) takes the cheapest provider; interactive reading follows the
+        // model's measured provider preferences, else the fastest.
+        provider: opts.sort === "price" ? { data_collection: "deny", sort: "price" } : { data_collection: "deny", ...(info.provider ?? { sort: opts.sort ?? "latency" }) },
+        ...info.extra,
+        ...opts.extra,
+        messages: [
+          { role: "system", content: explicitCache ? [{ type: "text", text: opts.system, ...cacheMark }] : opts.system },
+          {
+            role: "user",
+            content: opts.parts.map((p) =>
+              p.type === "text"
+                ? { type: "text", text: p.text, ...(p.cache ? cacheMark : {}) }
+                : { type: "image_url", image_url: { url: p.dataUrl } },
+            ),
+          },
+        ],
+      };
 
   const payload = JSON.stringify(body);
   const t0 = performance.now();
@@ -78,16 +96,23 @@ export async function streamChat(opts: {
     let res: Response;
     for (let attempt = 0; ; attempt++) {
       try {
-        res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          signal: opts.signal,
-          headers: {
-            Authorization: `Bearer ${env.openrouterKey}`,
-            "Content-Type": "application/json",
-            "X-Title": "Live translation (dev)",
-          },
-          body: payload,
-        });
+        res = local
+          ? await fetch(new URL("chat/completions", assertLocalUrl(env.localLlmUrl.replace(/\/?$/, "/"))), {
+              method: "POST",
+              signal: opts.signal,
+              headers: { "Content-Type": "application/json" },
+              body: payload,
+            })
+          : await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              signal: opts.signal,
+              headers: {
+                Authorization: `Bearer ${env.openrouterKey}`,
+                "Content-Type": "application/json",
+                "X-Title": "Live translation (dev)",
+              },
+              body: payload,
+            });
         break;
       } catch (e) {
         // The connection failed before any response (e.g. ECONNRESET): nothing streamed, retry once.
@@ -98,7 +123,7 @@ export async function streamChat(opts: {
     }
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
-      throw new ProviderError(`OpenRouter ${res.status}: ${text.slice(0, 400)}`, res.status, statusCode(res.status));
+      throw new ProviderError(`${local ? "Local model server" : "OpenRouter"} ${res.status}: ${text.slice(0, 400)}`, res.status, statusCode(res.status));
     }
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = "";
@@ -149,13 +174,13 @@ export async function streamChat(opts: {
       pageId: opts.pageId,
       ok,
       // A failed call with unknown billing is charged at the estimate so the budget stays conservative.
-      costUsd: ok ? stats.costUsd : stats.costUsd || (stats.ttfbMs ? estimateUsd(opts.model) : 0),
+      costUsd: local ? 0 : ok ? stats.costUsd : stats.costUsd || (stats.ttfbMs ? estimateUsd(opts.model) : 0),
       promptTokens: stats.promptTokens,
       completionTokens: stats.completionTokens,
       cachedTokens: stats.cachedTokens,
       ms: Math.round(stats.totalMs),
       ttfbMs: stats.ttfbMs === undefined ? undefined : Math.round(stats.ttfbMs),
-      provider: stats.provider,
+      provider: local ? "local" : stats.provider,
       reqKb: Math.round(payload.length / 1024),
       retries: stats.retries,
       error,

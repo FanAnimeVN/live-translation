@@ -226,6 +226,8 @@ export interface PlannedUpdate {
   covered: Set<string>;
   costUsd: number;
   ms: number;
+  /** Model that wrote the summary (recorded with it). */
+  model: string;
 }
 
 /**
@@ -246,12 +248,12 @@ export async function planMemoryUpdate(mem: SeriesMemory, force = false, model =
     "memory-update",
     model,
   );
-  return { update: value, upTo, covered: new Set(pending.map((l) => `${l.pageId}:${l.regionId}`)), costUsd, ms };
+  return { update: value, upTo, covered: new Set(pending.map((l) => `${l.pageId}:${l.regionId}`)), costUsd, ms, model };
 }
 
 /** Apply a planned update to the current memory, keeping lines read while it ran. */
 export function applyPlanned(fresh: SeriesMemory, plan: PlannedUpdate): SeriesMemory {
   if (!plan.update) return fresh;
   const keep = (fresh.pending ?? []).filter((l) => !plan.covered.has(`${l.pageId}:${l.regionId}`));
-  return applyMemoryUpdate(fresh, plan.update, plan.upTo, BACKGROUND_MODEL, keep);
+  return applyMemoryUpdate(fresh, plan.update, plan.upTo, plan.model, keep);
 }

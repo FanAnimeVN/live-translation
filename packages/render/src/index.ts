@@ -8,6 +8,7 @@ import {
   layoutText,
   sampleBorder,
   spansFromMask,
+  textArea,
   type Box,
   type EraseReport,
   type LayoutArea,
@@ -82,6 +83,8 @@ export interface PatchImage {
 
 export interface RenderOptions {
   fontFamily?: string;
+  /** Regions kept as art (bold display lettering): no erasing, a marker opens the translation. */
+  keep?: Set<string>;
   /** Only draw these ids (progressive rendering keeps the rest original). */
   only?: ReadonlySet<string>;
   /** Inpainted artwork per region id; text on art is lettered once its patch exists. */
@@ -137,8 +140,9 @@ export function predictInpaint(img: RGBAImage, regions: TextRegion[]): string[] 
   const out: string[] = [];
   for (const r of regions) {
     const snap = snapshot(copy, r.bubble ? unionBox([...r.members, r.bubble]) : expand(unionBox(r.members), 6));
-    const erase = eraseRegion(copy, r.members, { bubble: r.bubble, mode: r.bubble ? "auto" : "glyph", maxMid: r.bubble ? MAX_MID_BUBBLE : MAX_MID_FREE });
-    const needs = erase.mode === "skipped" || glyphResidue(copy, r.members) > MAX_RESIDUE;
+    const area_ = textArea(r, !!r.bubble && cornersFlat(copy, r.bubble));
+    const erase = eraseRegion(copy, area_, { bubble: r.bubble, mode: r.bubble ? "auto" : "glyph", maxMid: r.bubble ? MAX_MID_BUBBLE : MAX_MID_FREE });
+    const needs = erase.mode === "skipped" || glyphResidue(copy, area_) > MAX_RESIDUE;
     restore(copy, snap);
     if (needs) out.push(r.id);
   }
@@ -183,6 +187,10 @@ export function renderTranslation(
       out.push({ id: r.id, status: "empty" });
       continue;
     }
+    if (opts.keep?.has(r.id)) {
+      out.push({ id: r.id, status: "skipped" });
+      continue;
+    }
     if (t.role === "sfx" || t.role === "decorative") {
       // Stylised sound effects and title lettering stay part of the art.
       out.push({ id: r.id, status: t.role === "sfx" ? "sfx" : "skipped" });
@@ -211,7 +219,8 @@ export function renderTranslation(
       continue;
     }
     const snap = snapshot(img, r.bubble ? unionBox([...r.members, r.bubble]) : expand(unionBox(r.members), 6));
-    const erase = eraseRegion(img, r.members, {
+    const area_ = textArea(r, !!r.bubble && cornersFlat(img, r.bubble));
+    const erase = eraseRegion(img, area_, {
       bubble: r.bubble,
       mode: r.bubble ? "auto" : "glyph",
       maxMid: r.bubble ? MAX_MID_BUBBLE : MAX_MID_FREE,
@@ -221,13 +230,16 @@ export function renderTranslation(
       out.push({ id: r.id, status: "needs-inpaint", needsInpaint: true, erase });
       continue;
     }
-    const residue = glyphResidue(img, r.members, charSize);
+    const residue = glyphResidue(img, area_, charSize);
     if (residue > MAX_RESIDUE) {
       restore(img, snap);
       out.push({ id: r.id, status: "needs-inpaint", needsInpaint: true, erase, residue });
       continue;
     }
-    jobs.push({ r, t, erase, onArt: false, residue });
+    // Free text: start the lettering where the old glyphs were, not in a loose detector box
+    // that may cover art below a short caption.
+    const ext = erase.extent && expand(erase.extent, 4);
+    jobs.push({ r, t, erase, onArt: false, residue, seed: !r.bubble && ext && area(ext) < 0.85 * area(r.box) ? ext : undefined });
   }
   ctx.putImageData(img as never, 0, 0);
 
@@ -450,7 +462,7 @@ function textBounds(layout: TextLayout, box: LayoutArea, rotated?: boolean): Box
 }
 
 /** Rectangular caption boxes have paper in their corners; round bubbles do not. */
-function cornersFlat(img: RGBAImage, b: Box): boolean {
+export function cornersFlat(img: RGBAImage, b: Box): boolean {
   const s = Math.max(3, Math.round(Math.min(b.w, b.h) * 0.06));
   const corners: Box[] = [
     { x: b.x + 2, y: b.y + 2, w: s, h: s },

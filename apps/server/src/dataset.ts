@@ -13,6 +13,9 @@ export interface GtBubble {
 
 export interface DatasetPage {
   id: string;
+  /** Which ground-truth folder the page comes from: "local" (DATASET_DIR) or "set1", "set2"… (DATASET_DIRS). */
+  set: string;
+  root: string;
   title: string;
   seriesId: string;
   file: string;
@@ -23,7 +26,9 @@ export interface DatasetPage {
 
 interface RawPage {
   page_id: string;
-  source_title: string;
+  source_title?: string;
+  book_title?: string;
+  page_index?: number;
   image_file: string;
   image_size: { w: number; h: number };
   bubbles: GtBubble[];
@@ -35,22 +40,31 @@ let cache: DatasetPage[] | undefined;
 export async function listPages(): Promise<DatasetPage[]> {
   if (cache) return cache;
   if (!env.datasetDir) throw new Error("DATASET_DIR is not set in .env.local");
-  const raw = JSON.parse(await readFile(join(env.datasetDir, "ground_truth_benchmark.json"), "utf8")) as RawPage[];
-  const counters = new Map<string, number>();
-  cache = raw.map((p) => {
-    const seriesId = slug(p.source_title);
-    const page = (counters.get(seriesId) ?? 0) + 1;
-    counters.set(seriesId, page);
-    return {
-      id: p.page_id,
-      title: p.source_title.replace(/\s*\(Manga109\)\s*/i, "").trim(),
-      seriesId,
-      file: p.image_file,
-      size: p.image_size,
-      position: { chapter: 1, page },
-      gt: p.bubbles,
-    };
-  });
+  const dirs = [env.datasetDir, ...env.extraDatasetDirs];
+  const out: DatasetPage[] = [];
+  for (const [i, root] of dirs.entries()) {
+    const raw = JSON.parse(await readFile(join(root, "ground_truth_benchmark.json"), "utf8")) as RawPage[];
+    const counters = new Map<string, number>();
+    for (const p of raw) {
+      const name = p.source_title ?? p.book_title ?? "untitled";
+      const seriesId = slug(name);
+      const page = p.page_index ?? (counters.get(seriesId) ?? 0) + 1;
+      counters.set(seriesId, page);
+      if (out.some((x) => x.id === p.page_id)) continue;
+      out.push({
+        id: p.page_id,
+        set: i === 0 ? "local" : `set${i}`,
+        root,
+        title: name.replace(/\s*\(Manga109\)\s*/i, "").trim(),
+        seriesId,
+        file: p.image_file,
+        size: p.image_size,
+        position: { chapter: 1, page },
+        gt: p.bubbles,
+      });
+    }
+  }
+  cache = out;
   return cache;
 }
 
@@ -61,7 +75,7 @@ export async function getPage(id: string): Promise<DatasetPage> {
 }
 
 export async function readPageImage(page: DatasetPage): Promise<Buffer> {
-  return readFile(join(env.datasetDir, page.file));
+  return readFile(join(page.root, page.file));
 }
 
 const slug = (s: string) =>

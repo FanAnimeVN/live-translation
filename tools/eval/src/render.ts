@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createCanvas, GlobalFonts, loadImage } from "@napi-rs/canvas";
 import { expand, intersect, type Box, type PageResult } from "@lt/core";
 import { LETTERING_FONT, MAX_RESIDUE, renderTranslation, type Ctx2D, type PatchImage, type RegionRender } from "@lt/render";
-import { charSizesFor, decodeImage, getPage, inpaintRegions, listPages, loadResult, PRIVATE_DIR, readPageImage, ROOT } from "@lt/server";
+import { charSizesFor, decodeImage, getPage, INPAINT_DEVICE, INPAINT_ENGINE, inpaintRegions, listPages, loadResult, PRIVATE_DIR, readPageImage, ROOT, warmInpainters } from "@lt/server";
 import type { Rejected } from "../../../apps/server/src/inpaint";
 
 GlobalFonts.registerFromPath(join(ROOT, "apps", "demo", "public", "fonts", "PatrickHand-Regular.ttf"), LETTERING_FONT);
@@ -53,6 +53,8 @@ interface PageQa {
   rejected: string[];
 }
 const report: PageQa[] = [];
+if (inpaint) await warmInpainters();
+const engines: Record<string, number> = {};
 
 for (const page of pages) {
   const result = await load(page.id);
@@ -74,9 +76,11 @@ for (const page of pages) {
     const patches = await inpaintRegions(d, result.regions.filter((r) => need.includes(r.id)), charSizesFor(result), rejected);
     inpaintMs = Math.round(performance.now() - t0);
     const images: Record<string, PatchImage> = {};
+    for (const p of patches) engines[p.engine ?? "migan"] = (engines[p.engine ?? "migan"] ?? 0) + 1;
     for (const p of patches) images[p.id] = { x: p.x, y: p.y, image: await loadImage(Buffer.from(p.dataUrl.split(",")[1], "base64")), textBoxes: p.textBoxes, textExtent: p.textExtent };
     rctx.drawImage(d.canvas, 0, 0);
-    renders = renderTranslation(rctx as unknown as Ctx2D, { w: d.w, h: d.h }, result.regions, result.translations, { patches: images });
+    const keep = new Set(rejected.filter((x) => x.reason === "bold-text").map((x) => x.id));
+    renders = renderTranslation(rctx as unknown as Ctx2D, { w: d.w, h: d.h }, result.regions, result.translations, { patches: images, keep });
   }
   const qa = score(page.id, result, renders, inpaintMs, rejected);
   report.push(qa);
@@ -115,6 +119,7 @@ console.log(
 );
 await mkdir(join(PRIVATE_DIR, "qa"), { recursive: true });
 await writeFile(join(PRIVATE_DIR, "qa", `${evalRun ?? ns}-${safe(model)}.json`), JSON.stringify(report, null, 1), "utf8");
+console.log(`inpainting ${INPAINT_ENGINE} on ${INPAINT_DEVICE}: patches by engine ${JSON.stringify(engines)}`);
 console.log("written to", out);
 
 function score(pageId: string, result: PageResult, renders: RegionRender[], inpaintMs: number, rejected: Rejected[]): PageQa {

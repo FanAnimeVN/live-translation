@@ -3,40 +3,75 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as ort from "onnxruntime-node";
 import { createCanvas } from "@napi-rs/canvas";
-import { area, artTextMask, clampBox, containment, expand, glyphResidue, patchBlends, roundBox, type Box, type InpaintJob, type PageResult, type PatchData, type RGBAImage, type TextRegion } from "@lt/core";
+import { area, artTextMask, clampBox, containment, expand, glyphResidue, holeRingStd, patchBlends, roundBox, textArea, type Box, type InpaintJob, type PageResult, type PatchData, type RGBAImage, type TextRegion } from "@lt/core";
+import { cornersFlat } from "@lt/render";
 import { detectInCrop } from "./detector";
+import { INPAINT_DEVICE, INPAINT_ENGINE, LAMA_DEVICE, sessionOptions, type InpaintDevice } from "./device";
 import { ROOT } from "./env";
 import type { DecodedPage } from "./image";
+import { loadLama, runLama } from "./lama";
 
 /** andraniksargsyan/migan @ 406830d0fa60666da0071c342ad2fbc8f30c5c64, MIT (Picsart AI Research). */
 export const MIGAN_FILE = join(ROOT, "models", "inpaint", "migan_pipeline_v2.onnx");
 export const MIGAN_SHA256 = "6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b";
 
-let session: Promise<ort.InferenceSession> | undefined;
+const sessions = new Map<InpaintDevice, Promise<ort.InferenceSession>>();
 
-export function loadInpainter(): Promise<ort.InferenceSession> {
-  session ??= (async () => {
-    const bytes = await readFile(MIGAN_FILE);
-    const sha = createHash("sha256").update(bytes).digest("hex");
-    if (sha !== MIGAN_SHA256) throw new Error(`MI-GAN checksum mismatch (${sha})`);
-    return ort.InferenceSession.create(bytes, { executionProviders: ["cpu"], intraOpNumThreads: 4 });
-  })();
-  return session;
+export function loadInpainter(device: InpaintDevice = INPAINT_DEVICE): Promise<ort.InferenceSession> {
+  let s = sessions.get(device);
+  if (!s) {
+    s = (async () => {
+      const bytes = await readFile(MIGAN_FILE);
+      const sha = createHash("sha256").update(bytes).digest("hex");
+      if (sha !== MIGAN_SHA256) throw new Error(`MI-GAN checksum mismatch (${sha})`);
+      return ort.InferenceSession.create(bytes, sessionOptions(device));
+    })();
+    sessions.set(device, s);
+  }
+  return s;
 }
+
+/** LaMa once loaded; until then (it takes ~20 s) every hole goes to MI-GAN rather than wait. */
+let lama: ort.InferenceSession | undefined;
+let lamaLoading: Promise<void> | undefined;
+const lamaWanted = INPAINT_ENGINE === "lama" || (INPAINT_ENGINE === "auto" && INPAINT_DEVICE !== "cpu");
+
+/** Load the inpainters the settings call for, in the background (server start). */
+export function warmInpainters(): Promise<void> {
+  const migan = loadInpainter().then(() => undefined);
+  if (lamaWanted)
+    lamaLoading ??= loadLama("lama", LAMA_DEVICE).then(
+      (s) => void (lama = s),
+      (e: Error) => console.error(`LaMa failed to load on ${LAMA_DEVICE}, MI-GAN only:`, e.message),
+    );
+  return Promise.all([migan, lamaLoading]).then(() => undefined);
+}
+
+/** The engine for one hole: LaMa where it is ready and wanted, MI-GAN otherwise. */
+function engineFor(full: RGBAImage, job: InpaintJob): "migan" | "lama" {
+  if (!lama) return "migan";
+  if (INPAINT_ENGINE === "lama") return "lama";
+  // Textured surroundings (hatching, screentone): MI-GAN leaves grey ghosts of the letters there.
+  return holeRingStd(full, job) > TEXTURED_RING ? "lama" : "migan";
+}
+
+/** Ring spread above which a hole counts as sitting in textured art. */
+const TEXTURED_RING = 30;
 
 export type Patch = PatchData;
 
 /** Diagnostics for a reconstruction that needed the fallback (the text is still redrawn). */
 export interface Rejected {
   id: string;
-  reason: "rect-fallback" | "glyphs-survived" | "visible-patch";
+  /** bold-text: display lettering drawn with thick strokes stays part of the art (no patch). */
+  reason: "rect-fallback" | "glyphs-survived" | "visible-patch" | "bold-text";
   coverage: number;
 }
 
 /** Glyph-shaped ink left in the text core after reconstruction that triggers a whole-box retry. */
 const MAX_RESIDUE_AFTER = 0.02;
 
-/** Reconstruct the artwork under each region's text with MI-GAN. */
+/** Reconstruct the artwork under each region's text (MI-GAN, or LaMa in textured art; see `engineFor`). */
 export async function inpaintRegions(
   page: DecodedPage,
   regions: TextRegion[],
@@ -44,21 +79,31 @@ export async function inpaintRegions(
   rejected: Rejected[] = [],
 ): Promise<Patch[]> {
   const s = await loadInpainter();
+  if (lamaWanted) void warmInpainters();
   const full = page.ctx.getImageData(0, 0, page.w, page.h);
+  let engine: "migan" | "lama" = "migan";
+  const redraw = (job: InpaintJob) => {
+    engine = engineFor(full, job);
+    return engine === "lama" ? runLama(lama!, full, job) : runMigan(s, full, job);
+  };
   const out: Patch[] = [];
   for (const r of regions) {
     const t0 = performance.now();
-    const members = r.bubble ? r.members : await refineTextBoxes(page, r);
+    const members = r.bubble ? textArea(r, cornersFlat(full, r.bubble)) : await refineTextBoxes(page, r);
     // The size guess is box area / character count: a tighter box means smaller glyphs.
     const cs = charSizes[r.id] && Math.sqrt((charSizes[r.id] ** 2 * members.reduce((a, m) => a + area(m), 0)) / area(r.box));
     let job = artTextMask(full, members, { charSize: cs });
-    let result = await runMigan(s, full, job);
+    if (job.bold) {
+      rejected.push({ id: r.id, reason: "bold-text", coverage: job.coverage });
+      continue;
+    }
+    let result = await redraw(job);
     if (job.rect) rejected.push({ id: r.id, reason: "rect-fallback", coverage: job.coverage });
     else if (residueAfter(full, result, job, members, cs) > MAX_RESIDUE_AFTER) {
       // Strokes escaped the glyph mask: reconstruct the whole text box instead (protected art stays).
       rejected.push({ id: r.id, reason: "glyphs-survived", coverage: job.coverage });
       job = artTextMask(full, members, { charSize: cs, rect: true });
-      result = await runMigan(s, full, job);
+      result = await redraw(job);
     } else if (!patchBlends(full, result, job).ok) {
       rejected.push({ id: r.id, reason: "visible-patch", coverage: job.coverage });
     }
@@ -81,12 +126,12 @@ export async function inpaintRegions(
     }
     ctx.putImageData(patch, 0, 0);
     const png = await canvas.encode("png");
-    out.push({ id: r.id, x, y, w, h, dataUrl: `data:image/png;base64,${png.toString("base64")}`, coverage: job.coverage, ms: Math.round(performance.now() - t0), textBoxes: members, textExtent: job.extent });
+    out.push({ id: r.id, x, y, w, h, dataUrl: `data:image/png;base64,${png.toString("base64")}`, coverage: job.coverage, ms: Math.round(performance.now() - t0), textBoxes: members, textExtent: job.extent, engine });
   }
   return out;
 }
 
-async function runMigan(s: ort.InferenceSession, full: RGBAImage, job: InpaintJob): Promise<Uint8Array> {
+export async function runMigan(s: ort.InferenceSession, full: RGBAImage, job: InpaintJob): Promise<Uint8Array> {
   const { x, y, w, h } = job.crop;
   const n = w * h;
   const image = new Uint8Array(3 * n);

@@ -24,6 +24,8 @@ export interface EraseReport {
   erasedPixels: number;
   /** Balloon interior found by flood fill (1 = inside), for shape-aware lettering. */
   interior?: InteriorMask;
+  /** Bounds of the pixels repainted (page space): where the original text really sat. */
+  extent?: Box;
 }
 
 export interface InteriorMask {
@@ -189,6 +191,7 @@ export function eraseRegion(
   const ringStd = lumStd(img, expand(snap, 8, bounds), snap);
 
   let erased = 0;
+  let ex0 = Infinity, ey0 = Infinity, ex1 = -Infinity, ey1 = -Infinity;
   const inkSamples: number[][] = [[], [], []];
   for (const m of members) {
     const box = clampBox(expand(m, 3, bounds), img.width, img.height);
@@ -233,13 +236,22 @@ export function eraseRegion(
           inkSamples[1].push(img.data[i + 1]);
           inkSamples[2].push(img.data[i + 2]);
         }
-        if (img.data[i] !== bg[0] || img.data[i + 1] !== bg[1] || img.data[i + 2] !== bg[2]) erased++;
+        if (img.data[i] !== bg[0] || img.data[i + 1] !== bg[1] || img.data[i + 2] !== bg[2]) {
+          erased++;
+          if (ink[p]) {
+            ex0 = Math.min(ex0, bx + x);
+            ey0 = Math.min(ey0, by + y);
+            ex1 = Math.max(ex1, bx + x);
+            ey1 = Math.max(ey1, by + y);
+          }
+        }
         img.data[i] = bg[0];
         img.data[i + 1] = bg[1];
         img.data[i + 2] = bg[2];
       }
     }
   }
+  const extent = ex1 >= ex0 ? { x: ex0, y: ey0, w: ex1 - ex0 + 1, h: ey1 - ey0 + 1 } : undefined;
   // A flat patch inside busy line work (speed lines, hatching) is visible: undo it
   // and let the caller reconstruct the art instead (inpainting) or keep it.
   const boxStd = lumStd(img, snap);
@@ -250,7 +262,7 @@ export function eraseRegion(
   const ink: RGB = inkSamples[0].length > 20
     ? [median(inkSamples[0]), median(inkSamples[1]), median(inkSamples[2])]
     : guessInk(bg);
-  return { mode, bg, ink, flatness, inkShare, midShare, erasedPixels: erased };
+  return { mode, bg, ink, flatness, inkShare, midShare, erasedPixels: erased, extent };
 }
 
 /**

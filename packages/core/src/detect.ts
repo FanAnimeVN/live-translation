@@ -53,6 +53,8 @@ export interface RegionOptions {
   minScoreInBubble?: number;
   /** A bubble this confident becomes a region even with no text box inside: the reader model confirms or marks it empty. */
   lonelyBubble?: number;
+  /** Bubble boxes at or above this score count (default: minScore). Small beep balloons score low. */
+  minBubble?: number;
 }
 
 /** A bubble this sure vouches for faint text inside it. */
@@ -70,8 +72,9 @@ export function buildRegions(dets: Detection[], opts: RegionOptions = {}): TextR
   const minScore = opts.minScore ?? 0;
   const minInBubble = Math.min(minScore, opts.minScoreInBubble ?? minScore);
   const clean = suppressDuplicates(dets);
-  const bubbles = clean.filter((d) => d.cls === "bubble" && d.score >= minScore);
-  const vouching = bubbles.filter((b) => b.score >= CONFIDENT_BUBBLE);
+  const bubbles = clean.filter((d) => d.cls === "bubble" && d.score >= (opts.minBubble ?? minScore));
+  // A bubble sure enough to stand alone as a region also vouches for faint text inside it.
+  const vouching = bubbles.filter((b) => b.score >= Math.min(CONFIDENT_BUBBLE, opts.lonelyBubble ?? CONFIDENT_BUBBLE));
   const texts = clean
     .filter(isText)
     .filter((d) => d.score >= minScore || (d.score >= minInBubble && vouching.some((b) => containment(d.box, b.box) >= 0.6)));
@@ -177,6 +180,17 @@ export function buildRegions(dets: Detection[], opts: RegionOptions = {}): TextR
 
 function insetBox(b: Box, f: number): Box {
   return { x: b.x + b.w * f, y: b.y + b.h * f, w: b.w * (1 - 2 * f), h: b.h * (1 - 2 * f) };
+}
+
+/**
+ * Where a region's text may sit: its text boxes, plus the inside of its balloon. A detector
+ * box can miss the outer columns of a balloon's text; erasing and the leftover check then
+ * cover the whole inside, so no Japanese is left next to the Vietnamese.
+ */
+export function textArea(r: TextRegion, boxy = false): Box[] {
+  // A square-cornered box (a caption, a panel-attached balloon) has no art in its corners:
+  // its text may reach the border. A round balloon's box corners are outside the balloon.
+  return r.bubble ? [...r.members, insetBox(r.bubble, boxy ? 0.04 : 0.12)] : r.members;
 }
 
 /** Small or thin regions get a zoomed crop in the model request. */

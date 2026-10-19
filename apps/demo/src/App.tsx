@@ -16,6 +16,16 @@ interface PageState {
 }
 
 const NS = "demo";
+/** Pages translated ahead of the reader when prefetch is on. */
+const PREFETCH_PAGES = 2;
+
+/**
+ * Rough cost of one page from the model's prices: ~4.5k input tokens (page image + context)
+ * and ~1k output tokens (Claude Haiku 5.5 measured $0.00095/page on the 10 GT pages, 19/10).
+ */
+function estimatePageUsd(m: ModelInfo): number {
+  return (m.inUsd * 4500 + m.outUsd * 1000) / 1e6;
+}
 const ROLE_VI: Record<string, string> = {
   dialogue: "Thoại",
   thought: "Suy nghĩ",
@@ -43,7 +53,12 @@ export function App() {
   const [inpaintOn, setInpaintOn] = useState(true);
   const [patches, setPatches] = useState<Record<string, Record<string, PatchImage>>>({});
   const [inpaintInfo, setInpaintInfo] = useState<Record<string, string>>({});
+  // Bold display lettering (title logos, brush-stroke names) stays art; its marker opens the translation.
+  const [keptArt, setKeptArt] = useState<Record<string, string[]>>({});
+  // Translate the next pages ahead of the reader. Opt-in: it spends credits on pages not opened yet.
+  const [prefetchOn, setPrefetchOn] = useState(false);
   const requested = useRef(new Set<string>());
+  const inflight = useRef(new Set<string>());
 
   const page = pages.find((p) => p.id === pageId);
   const state: PageState = states[pageId] ?? { regions: [], translations: {}, status: "idle" };
@@ -103,9 +118,11 @@ export function App() {
 
   const translate = useCallback(
     async (p: PageInfo) => {
+      const key = `${p.id}|${model}`;
+      if (inflight.current.has(key)) return; // already being translated (ahead of the reader)
+      inflight.current.add(key);
       patch(p.id, () => ({ regions: [], translations: {}, status: "detecting", live: {} }));
       const t0 = performance.now();
-      const key = `${p.id}|${model}`;
       try {
         await translateStream({ pageId: p.id, model, ns: NS, inpaint: inpaintOn }, (e) => {
           if (e.type === "detected")
@@ -120,6 +137,7 @@ export function App() {
           else if (e.type === "patches") {
             // Backgrounds reconstructed while the model was still translating.
             e.patches.forEach((x) => requested.current.add(`${key}|${x.id}`));
+            if (e.kept?.length) setKeptArt((all) => ({ ...all, [key]: [...new Set([...(all[key] ?? []), ...e.kept!])] }));
             void loadPatchImages(e.patches).then((loaded) => {
               setPatches((all) => ({ ...all, [key]: { ...all[key], ...loaded } }));
               setInpaintInfo((m) => ({ ...m, [key]: `Đã vẽ lại nền cho ${e.patches.length} vùng ngay trong lúc dịch (${e.ms} ms, trên máy, không tốn API)` }));
@@ -130,12 +148,41 @@ export function App() {
         });
       } catch (err) {
         patch(p.id, (s) => ({ ...s, status: "error", error: String(err) }));
+      } finally {
+        inflight.current.delete(key);
       }
       void api.budget().then(setBudget);
       void api.memory(p.seriesId, NS, p.title).then(setMemory);
     },
     [model, patch, inpaintOn],
   );
+
+  // Once the open page is ready, translate the next pages of the same chapter one after the
+  // other (each uses the memory the previous one added), skipping pages already in the cache.
+  // Prefetching is not reading: memory still only feeds a page what came before it.
+  const ahead = useRef("");
+  useEffect(() => {
+    if (!prefetchOn || !page || !model || busyChapter || !(state.status === "done" || state.status === "cached")) return;
+    const run = `${page.id}|${model}`;
+    if (ahead.current === run) return;
+    ahead.current = run;
+    const list = pages.filter((x) => x.seriesId === page.seriesId);
+    const next = list.slice(list.findIndex((x) => x.id === page.id) + 1).slice(0, PREFETCH_PAGES);
+    void (async () => {
+      for (const p of next) {
+        if (!prefetchOn || ahead.current !== run) return; // the reader moved on: a new run starts from there
+        const s = states[p.id]?.status;
+        if (s === "done" || s === "detecting" || s === "translating") continue;
+        const { result, ms } = await api.cached(p.id, model, NS);
+        if (result) patch(p.id, () => ({ regions: result.regions, translations: result.translations, result, status: "cached", cacheMs: ms }));
+        else await translate(p);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefetchOn, pageId, model, state.status, busyChapter]);
+
+  const modelInfo = models.find((m) => m.id === model);
+  const perPage = modelInfo ? estimatePageUsd(modelInfo) : undefined;
 
   const translateChapter = async () => {
     if (!page) return;
@@ -168,6 +215,8 @@ export function App() {
       try {
         const res = await api.inpaint({ pageId, model, ns: NS, ids: fresh });
         const loaded = await loadPatchImages(res.patches);
+        const kept = (res.rejected ?? []).filter((x) => x.reason === "bold-text").map((x) => x.id);
+        if (kept.length) setKeptArt((all) => ({ ...all, [key]: [...new Set([...(all[key] ?? []), ...kept])] }));
         setPatches((all) => ({ ...all, [key]: { ...all[key], ...loaded } }));
         setInpaintInfo((m) => ({ ...m, [key]: `Đã vẽ lại nền cho ${res.patches.length} vùng trong ${res.ms} ms (trên máy, không tốn API)` }));
       } catch (e) {
@@ -211,6 +260,10 @@ export function App() {
         <label className="toggle">
           <input type="checkbox" checked={inpaintOn} onChange={(e) => setInpaintOn(e.target.checked)} /> Xóa chữ trên tranh (inpaint)
         </label>
+        <label className="toggle" title="Dịch sẵn các trang kế tiếp trong lúc bạn đọc, để lật trang là có ngay. Tốn credit cho cả trang chưa mở.">
+          <input type="checkbox" checked={prefetchOn} onChange={(e) => setPrefetchOn(e.target.checked)} /> Dịch trước {PREFETCH_PAGES} trang kế
+          {perPage !== undefined ? ` (~$${perPage.toFixed(4)}/trang)` : ""}
+        </label>
         <span className="budget">
           {budget ? `Đã dùng $${budget.spentUsd.toFixed(4)} / $${budget.limitUsd.toFixed(2)}` : ""}
         </span>
@@ -245,6 +298,7 @@ export function App() {
             selected={selected}
             onSelect={setSelected}
             patches={inpaintOn ? patches[patchKey] : undefined}
+            keep={keptArt[patchKey]}
             onNeedInpaint={state.status === "done" || state.status === "cached" ? requestInpaint : undefined}
           />
         )}
@@ -425,6 +479,7 @@ function Viewer(props: {
   selected?: string;
   onSelect: (id?: string) => void;
   patches?: Record<string, PatchImage>;
+  keep?: string[];
   onNeedInpaint?: (ids: string[]) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -451,6 +506,7 @@ function Viewer(props: {
       }
       const rendered = renderTranslation(ctx as unknown as Ctx2D, { w: canvas.width, h: canvas.height }, props.regions, props.translations, {
         patches: props.patches,
+        keep: props.keep ? new Set(props.keep) : undefined,
       });
       setRenders(rendered);
       const need = rendered.filter((r) => r.needsInpaint).map((r) => r.id);
@@ -458,7 +514,7 @@ function Viewer(props: {
     });
     return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img, props.regions, props.translations, props.showOriginal, props.fontReady, props.patches, props.onNeedInpaint]);
+  }, [img, props.regions, props.translations, props.showOriginal, props.fontReady, props.patches, props.keep, props.onNeedInpaint]);
 
   const onClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const c = e.currentTarget;

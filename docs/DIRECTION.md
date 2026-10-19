@@ -1,6 +1,6 @@
 # Hướng đi mới — Live translation
 
-Cập nhật 19/10/2026. Tài liệu cho buổi họp nhóm: thống nhất sản phẩm, kiến trúc, lộ trình và phân công.
+Cập nhật 19/10/2026 (tối). Tài liệu cho buổi họp nhóm: thống nhất sản phẩm, kiến trúc, lộ trình và phân công.
 Đặc tả mong muốn đầy đủ: [WISH-FINAL-APP.md](reference/WISH-FINAL-APP.md).
 
 ## 1. Sản phẩm trong một câu
@@ -29,8 +29,9 @@ Code cũ không bị xóa: nằm trong `legacy/` và tag git `legacy-v0`.
  → detector manga (ogkalu RT-DETR-v2, Apache-2.0, 11 MB): bóng thoại / chữ trong bóng / chữ tự do
  → gom vùng + thứ tự đọc phải→trái → ảnh trang có đánh số vùng (+ ảnh phóng to vùng chữ nhỏ)
  → model vision đọc chữ Nhật + dịch, kèm bộ nhớ truyện → trả về từng vùng (stream)
- → xóa chữ cũ (nền phẳng: tô lại; nền tranh/logo: giữ nguyên tranh) → dàn chữ Việt theo hình bóng
- → hiện dần từng bóng; cache văn bản (không lưu ảnh); chuẩn bị trước 2–3 trang kế
+ → xóa chữ cũ (trong bóng: tô lại lòng bóng; trên tranh: vẽ lại bằng MI-GAN, LaMa cho nền có kết cấu khi có GPU;
+   chữ trang trí/logo: giữ nguyên tranh + chấm bấm xem bản dịch) → dàn chữ Việt theo hình bóng
+ → hiện dần từng bóng; cache văn bản (không lưu ảnh); dịch trước 2 trang kế (bật thủ công, hiện giá trước)
 ```
 
 - **3 chế độ:** Cloud (đăng nhập + credit, key nằm ở server) · BYOK (key riêng của người dùng, ví dụ Gemini có free tier) · Local (Ollama/LM Studio chạy trên máy, offline không gọi mạng).
@@ -45,11 +46,11 @@ Code cũ không bị xóa: nằm trong `legacy/` và tag git `legacy-v0`.
 | Thời gian tìm vùng | ~0,28–0,37 s/trang khi đã warm, ~1 s lần đầu | CPU Ryzen 7 7840H, onnxruntime 4 luồng |
 | Dịch thật cả trang (5 model × 10 trang) | **107/107 vùng có bản dịch với mọi model**, 0 trang lỗi | Một lượt mỗi model, cùng detector, prompt và luồng bộ nhớ; tổng chi phí $0,20 |
 | Xóa chữ trong bóng thoại | Loang lấy lòng bóng (flood fill): giữ viền bóng và tranh ngoài bóng | |
-| Xóa chữ trên nền tranh | **Luôn vẽ lại bằng MI-GAN trên máy** (MIT, không tốn API), ~1,1 s/vùng trên CPU | Mask chỉ lấy nét chữ: mắt, mảng tô đặc và nét tranh cắt ngang khung chữ được bảo vệ; chữ nhỏ được dò lại khung trên ảnh phóng to |
+| Xóa chữ trên nền tranh | **Vẽ lại trên máy** (không tốn API): MI-GAN mặc định; LaMa cho vùng nằm trong nền có kết cấu khi có GPU. 10 trang: 27 vùng, 31,1 s trên CPU → 24,5 s với GPU, vùng còn sót nét 2 → 1 | Mask chỉ lấy nét chữ: mắt, mảng tô đặc, nét tranh cắt ngang và **nét gạch chéo (hatching)** được bảo vệ; chữ nhỏ được dò lại khung trên ảnh phóng to |
 | Demo trên trình duyệt | Trang 7: 11/11 vùng; bóng đầu 7,1 s; $0,00099; vẽ lại nền 2 vùng trong 2,8 s; mở lại từ bản lưu 3,5 ms | Một lượt, Claude Haiku 5.5, 19/10 |
-| Dàn chữ (10 trang, Haiku, prompt v3) | **93/93 vùng dịch được đều vẽ lại**; tràn 0, chồng chữ 0, lọt ngoài bóng 0; 4 vùng nghi còn nét (chữ trên nền gạch chéo dày) | Chấm tự động + xem ảnh; câu hét trong bóng, chú thích, tiêu đề chương giờ được dịch |
+| Dàn chữ (10 trang, Haiku, dịch lại 19/10 tối) | **93/93 vùng dịch được đều vẽ lại**; tràn 0, chồng chữ 0, lọt ngoài bóng 0; 1 vùng còn sót nét (SL-01, bóng dính viền khung) | Chấm tự động + xem ảnh; $0,00095/trang, bóng đầu p50 7,4 s, trang p50 12,5 s |
 | Bộ nhớ truyện v3 | Lưu trữ mọi bản tóm tắt (có mốc trang, model) + bản rút gọn gửi mỗi trang có trần ~2.100 token; truyện 1.000 chương / 300 nhân vật vẫn trong trần | Unit test; prompt mỗi trang ~3–6k token, rất xa ngưỡng 100k |
-| Unit test | 37/37 pass | `npm run check` |
+| Unit test | 41/41 pass | `npm run check` |
 
 ### Bake-off model (một lượt, 10 trang GT, 18/10)
 
@@ -62,7 +63,7 @@ Code cũ không bị xóa: nằm trong `legacy/` và tag git `legacy-v0`.
 | Gemini 3.7 Flash | 31/81 | 23,9% | 4,30 s | 8,05 s | $0,0098 | 0 |
 
 Cách đọc: nhãn GT có lỗi (ví dụ nhãn ghi ぎっそく, ảnh là さっそく), nên CER chỉ là chỉ báo đọc chữ, **chưa phải điểm chất lượng dịch**. Một lượt mỗi model, chưa phải p95.
-**Quyết định 19/10 (chấm mù 109 vùng bằng GPT-5.6, prompt v3, một lượt):** mặc định **Gemini 3.1 Flash-Lite** (đúng nghĩa 2,64/3, lỗi nghiêm trọng 4%, ~$0,005/trang, chậm: bóng đầu ~10 s); lựa chọn nhanh **DeepSeek V4.1 Flash 1017** (bóng đầu ~2,8 s, trang ~6,6 s, $0,0007/trang, lỗi nghiêm trọng 15%); Haiku 5.5 ở giữa (9%). Hướng cho extension: trang người đọc đang chờ dùng model nhanh, các trang dịch trước dùng model chất lượng. Chốt lại sau khi nhóm chấm mù. Chi tiết: [DEMO.md](DEMO.md).
+**Quyết định cuối 19/10 (giá trước, rồi chất lượng và tốc độ):** mặc định **Claude Haiku 5.5** (~$0,001/trang; trên 25 trang của nhóm chrF 38,1 so với 38,4 của Gemini 3.1 Flash-Lite, CER 14,5% so với 19,6%, tự chấm 3 so với 8 lỗi nặng). Lựa chọn nhanh **DeepSeek V4.1 Flash 1017** (bóng đầu ~2,2 s, ghim nhà cung cấp InferenceNet/DeepInfra vì Relace giá $0,05/$0,15 đọc ảnh sai 58% ký tự). Gemini 3.1 Flash-Lite là tùy chọn chất lượng cao (đắt ~5 lần). Gemini 2.5 Flash-Lite/Flash bị loại (bỏ sót vùng, CER 37–44%). Chi tiết: [DEMO.md](DEMO.md).
 
 **Ứng viên mới (19/10, một lượt, 10 trang, cùng điều kiện):** Gemini 3.8 Flash đọc chữ tốt nhất (CER 24,0%) nhưng ~$0,009/trang; MiMo-V2.6-Flash đọc kém nhất (CER 40%) và chậm (29 s/trang); Qwen3.7-Flash và Qwen3.8-Omni-Flash (chỉ Alibaba phục vụ) từ chối 2–3/10 trang truyện bình thường vì bộ lọc nội dung. Muse Spark loại vì giá và vì bản rẻ cho Meta dùng dữ liệu để huấn luyện.
 
@@ -70,7 +71,38 @@ Cách đọc: nhãn GT có lỗi (ví dụ nhãn ghi ぎっそく, ảnh là さ
 
 **Đọc chữ so với nhãn:** 29/81 nhãn có hai model khác hãng đọc giống nhau nhưng khác nhãn (nghi nhãn sai trước); 14/81 là ca khó thật. Bảng phân xử riêng: `.private/eval/ocr-audit.json` (không sửa dataset).
 
-**Còn yếu (ca khó, báo riêng):** chữ trên nền gạch chéo dày (MI-GAN để lại dải nhạt, cần thử LaMa); nhãn tên rất nhỏ ngoài vùng (model báo được nhưng ước vị trí lệch ~150 px nên chỉ hiện dạng ghi chú). Độ trễ bóng đầu trung vị ~5,5–6,7 s, có lần chờ 28 s do nhà cung cấp; chưa đạt mục tiêu < 5 s p95. Mục tiêu tham chiếu (chưa phải kết quả): bóng đầu < 5 s, trang ≤ 12 bóng < 8 s, mở lại từ cache < 200 ms.
+**Còn yếu (ca khó, báo riêng):** trang tiểu luận viết tay dày đặc (SL-01: khung chữ chỉ bao phần trên khối cột, phần dưới không bị xóa); bóng dính viền khung để sót kana ở mép; nhãn tên rất nhỏ ngoài vùng (model báo được nhưng ước vị trí lệch ~150 px nên chỉ hiện dạng ghi chú). Độ trễ bóng đầu trung vị ~5,5–6,7 s, có lần chờ 28 s do nhà cung cấp; chưa đạt mục tiêu < 5 s p95. Mục tiêu tham chiếu (chưa phải kết quả): bóng đầu < 5 s, trang ≤ 12 bóng < 8 s, mở lại từ cache < 200 ms.
+
+### Vẽ lại: MI-GAN hay LaMa (19/10)
+
+40 lỗ cắt vào tranh thật có đáp án + 10 vùng chữ thật, RTX 4060 Laptop / CPU Ryzen 7 7840H (`tools/eval/src/inpaint-bench.ts`).
+
+| Engine | Sai số điểm ảnh (MAE) | Thời gian/vùng GPU | Thời gian/vùng CPU | Nạp lần đầu | Dung lượng | Giấy phép |
+|---|---|---|---|---|---|---|
+| MI-GAN | 25,7 | **86 ms** (DirectML) | 0,87 s | 0,7–0,9 s | 28 MB | MIT |
+| LaMa (big-lama ONNX) | 26,9 | 0,43 s (WebGPU; DirectML lỗi) | 4,9 s | 21–26 s | 208 MB | Apache-2.0 |
+| LaMa bản OpenCV | 27,5 trên CPU; **hỏng trên WebGPU** (trả ảnh trắng) | — | 5,6 s | 18 s | 93 MB | Apache-2.0 |
+
+Sai số điểm ảnh ngang nhau, nhưng nhìn bằng mắt: ở nền gạch chéo MI-GAN để lại bóng mờ hình chữ cũ, LaMa nối tiếp nét gạch tự nhiên; ở nền giấy trắng hai bên như nhau.
+**Chốt:** MI-GAN mặc định (nhanh, nhẹ, hợp chạy trong trình duyệt); LaMa cho lỗ nằm trong nền có kết cấu khi có GPU; CPU-only chỉ dùng MI-GAN.
+Lỗi lớn nhất lại nằm ở **mặt nạ**: nét gạch chéo trong khung chữ bị coi là chữ và bị xóa. Đã sửa bằng phép thử "trường gạch" (hướng gạch đọc từ ngoài khung, lan vào trong theo từng nét song song): độ phủ lỗ trang 2 giảm 0,34 → 0,23, vùng gạch giữ nguyên.
+Học từ manga-image-translator: họ dùng LaMa huấn luyện thêm trên manga (MIT) — việc tiếp theo là thử bản này ([so sánh](reference/compare-manga-image-translator.md)).
+
+### Model chạy trên máy (máy 16 GB RAM, 19/10)
+
+Dịch thuần văn bản 120 bóng thoại của nhóm (chữ Nhật lấy từ nhãn, tức OCR hoàn hảo), RTX 4060 Laptop 8 GB, Ollama (`tools/eval/src/mt-text.ts`):
+
+| Model | Dung lượng | chrF so với bản dịch chuẩn | Thời gian/bóng | Giấy phép |
+|---|---|---|---|---|
+| Claude Haiku 5.5 (cloud, mốc so sánh) | — | **38,7** | 1,5 s | thương mại, $0,0033/120 bóng |
+| Hy-MT2 7B Q4 (Tencent, model dịch chuyên dụng) | 4,6 GB | **33,8** | 0,40 s | Apache-2.0 (theo khóa model) |
+| Hy-MT2 1.8B Q6 | 1,5 GB | 26,9 | 0,19 s | Apache-2.0 |
+| Qwen3 4B Instruct 2507 Q4 | 2,5 GB | 24,4 | 0,19 s | Apache-2.0 |
+| Gemma 4 E2B (đọc ảnh) | 7,2 GB | loại: bịa chữ không có trên trang | 7–9 s/ô | Apache-2.0 |
+
+Hy-MT2 dịch nhầm câu ngữ cảnh khi kèm "background" (chrF 7B tụt còn 26,3) → gọi từng câu riêng. Model dịch chữ không nhìn được tranh nên **không biết ai nói với ai** — chế độ local cần một model đọc ảnh (Qwen3-VL 8B / Qwen3.5 / Gemma 4 E4B đang tải, sẽ đo cùng điều kiện).
+
+Bộ nhớ truyện toàn cục và "P/S nhắc tình tiết": thiết kế ở [STORY-MEMORY.md](STORY-MEMORY.md).
 
 ## 5. Tính năng theo mốc
 
@@ -119,7 +151,7 @@ Pipeline lõi và phần tích hợp: Claude làm, nhóm review.
 ## 9. Việc cần làm ngay
 
 1. Xóa biến môi trường Windows cũ `OPENROUTER_API_KEY` (key khác, limit $0) nếu không còn dùng; dự án đã ưu tiên `.env.local`.
-2. **Giải phóng ổ C:** hiện chỉ còn khoảng 55 MB trống, bộ nhớ ảo gần cạn, đã làm lỗi khi xử lý ảnh. Nên trống ít nhất 10–20 GB trước buổi demo.
+2. **Ổ C:** còn ~4,8 GB trống (19/10 tối); nên giữ ≥ 10 GB. Model Ollama nằm ở `D:\ollama_models`.
 3. Gửi URL trang raw muốn demo, để kiểm tra cách trang đó tải ảnh.
 4. Xin quyền truy cập Manga109 (`hal-utokyo/Manga109` trên Hugging Face) để có bộ đánh giá lớn hơn.
 5. Lưu ý bản quyền: ảnh Manga109 chỉ dùng học thuật, trang demo chỉ chạy trên máy, slide ghi "courtesy of [tác giả]".
@@ -133,4 +165,5 @@ npm run server      # mở http://127.0.0.1:8787
 ```
 
 Cần `.env.local` (không commit) gồm `OPENROUTER_API_KEY`, `DATASET_DIR` và `DETECTOR_MODEL`; xem `.env.example`.
+Tùy chọn: `INPAINT_DEVICE=dml` (vẽ lại trên GPU Windows), `INPAINT_ENGINE=auto|migan|lama`, `LOCAL_LLM_URL` (mặc định Ollama `http://127.0.0.1:11434/v1`, chỉ chấp nhận localhost).
 Kiểm tra: `npm run check`, đo tìm vùng: `npm run detect`, so sánh model: `npm run eval`.

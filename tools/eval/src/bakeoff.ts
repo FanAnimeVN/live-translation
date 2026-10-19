@@ -8,7 +8,7 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { cer, emptyMemory, mergePage, normalizeJa, percentile, type PageResult, type SeriesMemory } from "@lt/core";
+import { cer, chrfScore, chrfStats, emptyMemory, mergePage, normalizeJa, percentile, type ChrfStats, type PageResult, type SeriesMemory } from "@lt/core";
 import { listPages, modelInfo, PRIVATE_DIR, readPageImage, spentUsd, translatePage } from "@lt/server";
 import { matchRegions, validGt } from "./gt";
 
@@ -31,7 +31,12 @@ const runId = arg("run", new Date().toISOString().replace(/[:.]/g, "-").slice(0,
 const safe = (s: string) => s.replace(/[^a-zA-Z0-9._-]/g, "_");
 const outDir = join(PRIVATE_DIR, "eval", runId);
 
-const pages = (await listPages()).filter((p) => !only.length || only.includes(p.id));
+// --set local | set1 (the team's 50 pages) …; --books ARMS,Akuhamu limits to those titles.
+const sets = arg("set", "").split(",").filter(Boolean);
+const books = arg("books", "").split(",").filter(Boolean);
+const pages = (await listPages()).filter(
+  (p) => (!only.length || only.includes(p.id)) && (!sets.length || sets.includes(p.set)) && (!books.length || books.some((b) => p.title.includes(b))),
+);
 
 interface PageScore {
   pageId: string;
@@ -46,6 +51,8 @@ interface PageScore {
   exact: number;
   edits: number;
   refLen: number;
+  /** chrF statistics of the Vietnamese against the gold translation, per GT bubble. */
+  chrf?: ChrfStats[];
   firstRegionMs?: number;
   totalMs?: number;
   costUsd: number;
@@ -104,6 +111,7 @@ function score(result: PageResult, gtAll: Parameters<typeof validGt>[0], size: {
   let exact = 0;
   let edits = 0;
   let refLen = 0;
+  const chrf: ChrfStats[] = [];
   let gtFound = 0;
   for (const g of gt) {
     const matched = matchRegions(g.bbox, result.regions);
@@ -117,6 +125,15 @@ function score(result: PageResult, gtAll: Parameters<typeof validGt>[0], size: {
     const c = cer(hyp, g.ja_ocr_truth);
     edits += c.edits;
     refLen += c.refLen;
+    if (g.vi_gold_trans?.trim()) {
+      const vi = matched
+        .map((r) => result.translations[r.id])
+        .filter(Boolean)
+        .sort((a, b) => a!.seq - b!.seq)
+        .map((t) => t!.vi)
+        .join(" ");
+      chrf.push(chrfStats(vi, g.vi_gold_trans));
+    }
     if (normalizeJa(hyp) === normalizeJa(g.ja_ocr_truth)) exact++;
   }
   const roles: Record<string, number> = {};
@@ -130,6 +147,7 @@ function score(result: PageResult, gtAll: Parameters<typeof validGt>[0], size: {
     exact,
     edits,
     refLen,
+    chrf,
     firstRegionMs: result.timings.firstRegionMs,
     totalMs: result.timings.totalMs,
     costUsd: result.usage.costUsd ?? 0,
@@ -168,6 +186,7 @@ function aggregate(model: string, scores: PageScore[]) {
     gtExact: `${sum1("exact")}/${sum1("gt")}`,
     gtFound: `${sum1("gtFound")}/${sum1("gt")}`,
     cerVsLabels: sum1("refLen") ? sum1("edits") / sum1("refLen") : null,
+    chrfVsGold: chrfScore(firstRun.flatMap((s) => s.chrf ?? [])),
     firstRegionMs: { p50: percentile(first, 0.5), p90: percentile(first, 0.9), p95: percentile(first, 0.95), n: first.length },
     pageMs: { p50: percentile(total, 0.5), p90: percentile(total, 0.9), p95: percentile(total, 0.95), n: total.length },
     costPerPageUsd: ok.length ? sum("costUsd") / ok.length : null,
@@ -180,11 +199,11 @@ function aggregate(model: string, scores: PageScore[]) {
 }
 
 function printTable(rows: Record<string, ReturnType<typeof aggregate>>) {
-  console.log("\n| Model | Pages ok | Regions translated | GT exact (vs labels) | CER vs labels | First region p50 | Page p50 | $/page |");
-  console.log("|---|---|---|---|---|---|---|---|");
+  console.log("\n| Model | Pages ok | Regions translated | GT exact (vs labels) | CER vs labels | chrF vs gold VI | First region p50 | Page p50 | $/page |");
+  console.log("|---|---|---|---|---|---|---|---|---|");
   for (const [, r] of Object.entries(rows)) {
     console.log(
-      `| ${r.label} | ${r.pagesOk} | ${r.regionCoverage} | ${r.gtExact} | ${r.cerVsLabels === null ? "—" : (100 * r.cerVsLabels).toFixed(1) + "%"} | ${fmt(r.firstRegionMs.p50)} | ${fmt(r.pageMs.p50)} | ${r.costPerPageUsd === null ? "—" : "$" + r.costPerPageUsd.toFixed(5)} |`,
+      `| ${r.label} | ${r.pagesOk} | ${r.regionCoverage} | ${r.gtExact} | ${r.cerVsLabels === null ? "—" : (100 * r.cerVsLabels).toFixed(1) + "%"} | ${r.chrfVsGold.toFixed(1)} | ${fmt(r.firstRegionMs.p50)} | ${fmt(r.pageMs.p50)} | ${r.costPerPageUsd === null ? "—" : "$" + r.costPerPageUsd.toFixed(5)} |`,
     );
   }
 }

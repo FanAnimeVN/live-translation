@@ -124,9 +124,11 @@ app.post("/api/translate", async (c) => {
         await new Promise((r) => setTimeout(r, 300));
         const ids = predictInpaint(decoded.ctx.getImageData(0, 0, decoded.w, decoded.h), regions);
         if (!ids.length) return;
-        const patches = await inpaintRegions(decoded, regions.filter((r) => ids.includes(r.id)));
+        const rejected: Rejected[] = [];
+        const patches = await inpaintRegions(decoded, regions.filter((r) => ids.includes(r.id)), {}, rejected);
         rememberPatches(page.id, regions, patches);
-        if (!abort.signal.aborted) await write({ type: "patches", patches, ms: Math.round(performance.now() - t0) });
+        const kept = rejected.filter((x) => x.reason === "bold-text").map((x) => x.id);
+        if (!abort.signal.aborted) await write({ type: "patches", patches, ms: Math.round(performance.now() - t0), kept });
       })().catch((e) => console.error("speculative inpaint failed:", (e as Error).message));
     };
     try {
@@ -139,7 +141,7 @@ app.post("/api/translate", async (c) => {
         const merged = mergePage(memory, page.id, page.position, result.notes, Object.values(result.translations));
         await saveMemory(ns, merged.memory);
         await saveResult(ns, result);
-        if ((merged.memory.pending?.length ?? 0) >= UPDATE_EVERY_LINES) void backgroundUpdate(ns, page.seriesId, page.title, false);
+        if ((merged.memory.pending?.length ?? 0) >= UPDATE_EVERY_LINES) void backgroundUpdate(ns, page.seriesId, page.title, false, model);
       });
       // Keep the stream open until the patches are out (they usually finish first).
       await speculative;
@@ -193,12 +195,13 @@ app.post("/api/inpaint", async (c) => {
 
 const updating = new Set<string>();
 /** Summarize pending dialogue on a cheap model off the critical path, then merge under the series lock. */
-async function backgroundUpdate(ns: string, seriesId: string, title: string, force: boolean) {
+/** A page read on a local model is summarized on it too: offline reading never calls the cloud. */
+async function backgroundUpdate(ns: string, seriesId: string, title: string, force: boolean, readingModel?: string) {
   const key = `${ns}:${seriesId}`;
   if (updating.has(key)) return null;
   updating.add(key);
   try {
-    const plan = await planMemoryUpdate(await loadMemory(ns, seriesId, title), force);
+    const plan = await planMemoryUpdate(await loadMemory(ns, seriesId, title), force, readingModel?.startsWith("local/") ? readingModel : undefined);
     if (!plan) return null;
     return await serial(key, async () => {
       const fresh = applyPlanned(await loadMemory(ns, seriesId, title), plan);

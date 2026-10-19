@@ -8,5 +8,7 @@ export { MODELS, DEFAULT_MODEL, modelInfo } from "./models";
 export { loadMemory, saveMemory } from "./memoryStore";
 export { saveResult, loadResult } from "./results";
 export { spentUsd } from "./ledger";
-export { charSizesFor, inpaintRegions, loadInpainter, refineTextBoxes } from "./inpaint";
+export { INPAINT_DEVICE, INPAINT_ENGINE, type InpaintDevice, type InpaintEngine } from "./device";
+export { charSizesFor, inpaintRegions, loadInpainter, refineTextBoxes, runMigan, warmInpainters } from "./inpaint";
+export { LAMA_MODELS, loadLama, runLama, type LamaVariant } from "./lama";
 export { applyPlanned, bootstrapFromMetadata, planMemoryUpdate, searchSeries, BACKGROUND_MODEL, UPDATE_EVERY_LINES } from "./context";

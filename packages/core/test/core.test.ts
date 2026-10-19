@@ -3,6 +3,8 @@ import {
   applyRegionRules,
   buildRegions,
   cer,
+  chrfScore,
+  chrfStats,
   fromPermille,
   parseNotesObject,
   emptyMemory,
@@ -191,6 +193,16 @@ describe("story memory", () => {
     expect(r.memory.entities[0].vi).toBe("Nana-chan");
     expect(r.memory.entities[0].status).toBe("locked");
     expect(r.memory.entities[0].evidence).toHaveLength(2);
+  });
+});
+
+describe("chrF", () => {
+  it("scores an identical translation 100 and an unrelated one near 0, ignoring spaces and case", () => {
+    expect(chrfScore([chrfStats("Tớ là Nana!", "tớ là  Nana!")])).toBeCloseTo(100);
+    expect(chrfScore([chrfStats("xyz", "Tớ là Nana!")])).toBeLessThan(5);
+    const close = chrfScore([chrfStats("Tớ tên là Nana!", "Tớ là Nana!")]);
+    expect(close).toBeGreaterThan(60);
+    expect(close).toBeLessThan(100);
   });
 });
 

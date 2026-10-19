@@ -147,6 +147,8 @@ export interface PatchData {
   textBoxes: Box[];
   /** Bounds of the glyph strokes that were removed: where the original text really sat. */
   textExtent?: Box;
+  /** Inpainter that redrew the art. */
+  engine?: "migan" | "lama";
 }
 
 export type TranslateEvent =
@@ -156,6 +158,6 @@ export type TranslateEvent =
   /** Text the reader model found outside every detected region, located and added after the page. */
   | { type: "regions-added"; regions: TextRegion[] }
   /** Backgrounds reconstructed while the page was being translated (image data, never stored). */
-  | { type: "patches"; patches: PatchData[]; ms: number }
+  | { type: "patches"; patches: PatchData[]; ms: number; kept?: string[] }
   | { type: "done"; result: PageResult }
   | { type: "error"; message: string; code?: string };

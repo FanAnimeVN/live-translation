@@ -1,3 +1,5 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   applyRegionRules,
   buildUserParts,
@@ -30,6 +32,7 @@ import { detect, detectInCrop } from "./detector";
 import { decodeImage, markedPageDataUrl, regionCrops, type DecodedPage } from "./image";
 import { mockReply } from "./mock";
 import { streamChat } from "./openrouter";
+import { PRIVATE_DIR } from "./env";
 
 export interface PageInput {
   id: string;
@@ -101,6 +104,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
       }
       return;
     }
+    let raw = "";
     const stats = await streamChat({
       model: opts.model,
       system: SYSTEM_PROMPT,
@@ -109,8 +113,13 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
       pageId: page.id,
       signal: opts.signal,
       extra: opts.extra,
-      onText: (d) => parser.push(d),
+      onText: (d) => {
+        if (process.env.LT_DUMP_RAW) raw += d;
+        parser.push(d);
+      },
     });
+    // Dev aid for models that do not follow the format (LT_DUMP_RAW=1): the raw reply, private.
+    if (process.env.LT_DUMP_RAW) await writeFile(join(PRIVATE_DIR, `raw-${opts.model.replace(/[^\w.-]/g, "_")}-${page.id}${onlyIds ? "-repair" : ""}.txt`), raw, "utf8");
     ttfbMs ??= stats.ttfbMs;
     usage.promptTokens += stats.promptTokens ?? 0;
     usage.completionTokens += stats.completionTokens ?? 0;

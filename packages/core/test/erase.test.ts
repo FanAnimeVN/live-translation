@@ -111,6 +111,51 @@ describe("artTextMask", () => {
     expect(job.coverage).toBeLessThan(0.85);
   });
 
+  it("flags display lettering drawn with thick brush strokes so it stays part of the art", () => {
+    const img = image(200, 120, 200);
+    for (let k = 0; k < 3; k++) rect(img, 30 + k * 50, 30, 30, 60, 10); // three heavy strokes
+    const job = artTextMask(img, [{ x: 24, y: 24, w: 160, h: 72 }], { charSize: 60 });
+    expect(job.bold).toBe(true);
+    const thin = image(200, 120, 200);
+    for (let k = 0; k < 3; k++) glyph(thin, 30 + k * 50, 30, 30);
+    expect(artTextMask(thin, [{ x: 24, y: 24, w: 160, h: 72 }], { charSize: 32 }).bold).toBe(false);
+  });
+
+  it("leaves hatching that the text box covers out of the hole and still removes the letters", () => {
+    const img = image(220, 240, 250);
+    // diagonal hatching over the top of the page, reaching 25 px into the text box
+    for (let x0 = -60; x0 < 220; x0 += 6)
+      for (let t = 0; t < 22; t++)
+        for (const y0 of [2, 24, 46]) {
+          const x = x0 + y0 + Math.round(t * 0.7);
+          const y = y0 + Math.round(t * 0.7);
+          if (x >= 0 && x < 219 && y < 62) rect(img, x, y, 2, 2, 20);
+        }
+    for (let k = 0; k < 4; k++) glyph(img, 78, 80 + k * 28, 20); // a column of letters under the shading
+    const box = [{ x: 72, y: 38, w: 34, h: 160 }];
+    const job = artTextMask(img, box, { charSize: 22 });
+    const at = (x: number, y: number) => job.hole[(y - job.crop.y) * job.crop.w + (x - job.crop.x)];
+    expect(at(78, 90)).toBe(1); // letter removed
+    let hatchIn = 0, hatchHole = 0;
+    for (let y = 40; y < 60; y++)
+      for (let x = 74; x < 104; x++)
+        if (get(img, x, y) < 100) {
+          hatchIn++;
+          hatchHole += at(x, y);
+        }
+    expect(hatchIn).toBeGreaterThan(30);
+    expect(hatchHole / hatchIn).toBeLessThan(0.1); // the shading inside the box stays art
+  });
+
+  it("still removes a vertical dash that sits in line under vertical speed lines", () => {
+    const img = image(200, 220, 250);
+    for (let x = 2; x < 200; x += 6) rect(img, x, 0, 2, 66, 20); // vertical speed lines above the text
+    rect(img, 92, 70, 2, 20, 15); // "ー" of vertical text, right under a speed line
+    for (let k = 0; k < 3; k++) glyph(img, 83, 98 + k * 26, 20);
+    const job = artTextMask(img, [{ x: 80, y: 68, w: 28, h: 130 }], { charSize: 22 });
+    expect(job.hole[(80 - job.crop.y) * job.crop.w + (92 - job.crop.x)]).toBe(1);
+  });
+
   it("keeps a filled eye beside small handwriting out of the hole, even in the whole-box fallback", () => {
     const img = image(160, 160, 235); // pale art (a hand, a face)
     for (let k = 0; k < 4; k++) glyph(img, 50, 40 + k * 12, 9); // a column of small handwriting
