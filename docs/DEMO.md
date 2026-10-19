@@ -44,7 +44,7 @@ Muốn dịch lại cả chương từ bộ nhớ sạch (~2 phút, ~$0,06): `np
 | Mở lại trang đã dịch | ~3 ms (không gọi model) |
 | Bộ nhớ truyện | Mỗi trang gửi tối đa ~2.100 token bộ nhớ; thử truyện 1.000 chương / 300 nhân vật vẫn trong trần |
 
-Mặc định hiện tại là **Claude Haiku 5.5** (giá trước: ~$0,001/trang; trên 25 trang của nhóm ngang Gemini 3.1 Flash-Lite về chrF, ít lỗi nặng hơn khi tự chấm). Bảng dưới là lần chấm mù đầu tiên (109 vùng, giám khảo GPT-5.6, tên model bị ẩn và xáo trộn mỗi trang; một lượt, là tín hiệu sàng lọc, chưa thay được người chấm):
+Mặc định hiện tại là **Claude Haiku 5.5** (giá trước: ~$0,001/trang; trên 25 trang của nhóm ngang DeepSeek 1017 về chrF và ít lỗi nặng hơn khi tự chấm; Gemini 3.1 Flash-Lite cao hơn rõ (chrF 43,4 so với 38,1) nhưng đắt ~7 lần). Bảng dưới là lần chấm mù đầu tiên (109 vùng, giám khảo GPT-5.6, tên model bị ẩn và xáo trộn mỗi trang; một lượt, là tín hiệu sàng lọc, chưa thay được người chấm):
 
 | Model | Đúng nghĩa (0–3) | Lỗi nghiêm trọng | Bóng đầu (trung vị) | Cả trang | $/trang |
 |---|---|---|---|---|---|
@@ -55,6 +55,12 @@ Mặc định hiện tại là **Claude Haiku 5.5** (giá trước: ~$0,001/tran
 | DeepSeek V4.1 Flash | 1,75 | 33% | 3,4 s | 8,5 s | $0,0019 |
 
 Tóm tắt truyện chạy nền: DeepSeek V4.1 Flash 1017 trung thành nhất trong 5 model (chấm mù, cùng đầu vào).
+
+## Chấm mù cùng nhóm (sau buổi demo)
+
+Mở `http://127.0.0.1:8787/judge` trên máy đang chạy server (server chỉ nghe trên chính máy đó, nên mọi người chấm lần lượt trên máy này). Mỗi người nhập tên,
+chấm các bản dịch ẩn danh của từng ô thoại (có cả bản dịch của nhóm làm đối chứng ẩn). Mỗi người ~60–100 ô là đủ để thấy khác biệt
+giữa model mặc định, model nhanh và model chất lượng; nút **Kết quả** cho bảng tổng hợp.
 
 ## Còn thiếu (nói thẳng)
 

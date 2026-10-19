@@ -49,7 +49,8 @@ export const MODELS: ModelInfo[] = [
  * Vietnamese (chrF 38.1 vs 38.4) and reads Japanese better (CER 14.5% vs 19.6%); in a blind
  * review of the 30 most divergent lines it made 3 severe meaning errors to DeepSeek's 8, for
  * ~35% more cost ($0.0014 vs $0.0010 per double page). DeepSeek is the fast option (2.7 s to
- * the first bubble vs 5.5 s); Gemini 3.1 Flash-Lite the opt-in quality tier (~5x the price).
+ * the first bubble vs 5.5 s); Gemini 3.1 Flash-Lite the opt-in quality tier: on the same 25 pages
+ * chrF 43.4 (best) and CER 16.3%, but $0.0093 per double page (~7x) and 11 s to the first bubble.
  */
 export const DEFAULT_MODEL = "anthropic/claude-haiku-5.5";
 

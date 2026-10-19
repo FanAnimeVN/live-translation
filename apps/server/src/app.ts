@@ -16,6 +16,7 @@ import { loadResult, saveResult } from "./results";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PRIVATE_DIR } from "./env";
+import { judge } from "./judge";
 
 const locks = new Map<string, Promise<unknown>>();
 /** Serialize work per series so memory updates never race. */
@@ -27,6 +28,8 @@ function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export const app = new Hono();
+// Blind judging page for the team (local only): /judge
+app.route("/", judge);
 
 // Demo UI: static shell, esbuild bundle and the pinned OFL lettering font.
 const DEMO = join(ROOT, "apps", "demo");

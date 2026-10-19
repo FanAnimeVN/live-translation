@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chấm mù bản dịch</title>
+<style>
+  :root { --bg: #f7f7f5; --card: #fff; --ink: #1c1c1c; --muted: #6b6b6b; --line: #deded9; --accent: #c2410c; --bad: #b91c1c; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161616; --card: #202020; --ink: #ececec; --muted: #9a9a9a; --line: #333; --accent: #fb923c; --bad: #f87171; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 2; }
+  header strong { font-size: 16px; }
+  .bar { flex: 1; min-width: 120px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  main { display: grid; grid-template-columns: minmax(240px, 420px) minmax(0, 1fr); gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } .crop img { max-height: 45vh; object-fit: contain; } }
+  .crop img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  .row > span { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+  details { margin-top: 8px; color: var(--muted); }
+  .cand { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  .cand .vi { font-size: 17px; margin: 2px 0 8px; white-space: pre-wrap; }
+  .cand .vi.empty { color: var(--bad); font-style: italic; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; font-size: 14px; }
+  .row label { white-space: nowrap; }
+  .tag { font-weight: 700; color: var(--accent); margin-right: 6px; }
+  button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .help { color: var(--muted); font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <strong>Chấm mù bản dịch</strong>
+  <label>Người chấm <input id="rater" size="12" placeholder="tên bạn"></label>
+  <span id="count" class="help"></span>
+  <div class="bar"><i id="progress" style="width:0"></i></div>
+  <button id="showSummary">Kết quả</button>
+</header>
+<main id="main"><p class="help">Nhập tên người chấm để bắt đầu.</p></main>
+<script>
+const run = new URLSearchParams(location.search).get("run") || "team25";
+const raterEl = document.getElementById("rater");
+const main = document.getElementById("main");
+let data, idx = 0;
+try { raterEl.value = localStorage.getItem("judge-rater") || ""; } catch {}
+raterEl.addEventListener("change", start);
+document.getElementById("showSummary").onclick = summary;
+if (raterEl.value) start();
+
+async function start() {
+  const rater = raterEl.value.trim();
+  if (!rater) return;
+  try { localStorage.setItem("judge-rater", rater); } catch {}
+  data = await fetch(`/api/judge/items?run=${encodeURIComponent(run)}&rater=${encodeURIComponent(rater)}`).then(r => r.json());
+  idx = data.items.findIndex(i => !i.done);
+  show();
+}
+
+function show() {
+  const doneN = data.items.filter(i => i.done).length;
+  document.getElementById("count").textContent = `${doneN}/${data.total} ô thoại`;
+  document.getElementById("progress").style.width = `${100 * doneN / Math.max(1, data.total)}%`;
+  if (idx < 0) { main.innerHTML = `<p>Bạn đã chấm hết ${data.total} ô thoại. Cảm ơn! Bấm <b>Kết quả</b> để xem tổng hợp.</p>`; return; }
+  const it = data.items[idx];
+  const letters = "ABCDEFG";
+  main.innerHTML = `
+    <section class="crop">
+      <img alt="Ô thoại cần chấm (viền đỏ)" src="/api/judge/crop?run=${encodeURIComponent(run)}&item=${encodeURIComponent(it.id)}">
+      <details><summary>Xem chữ Nhật</summary><div style="font-size:18px">${esc(it.ja)}</div></details>
+      <p class="help">Chấm từng bản dịch của ô có viền đỏ. Tên model bị ẩn và thứ tự xáo trộn; một bản là bản dịch của người.<br>
+      <b>Đúng nghĩa</b>: 3 đúng hoàn toàn · 2 lệch nhỏ · 1 sai một phần quan trọng · 0 sai/ngược nghĩa.<br>
+      <b>Tự nhiên</b>: 3 như người Việt viết · 0 khó hiểu.<br>
+      <b>Lỗi nặng</b>: sai ý chính, sai xưng hô làm đổi quan hệ, bỏ sót hoặc bịa thêm.</p>
+    </section>
+    <section>
+      ${it.candidates.map((c, k) => `
+        <div class="cand" data-cid="${c.cid}">
+          <div class="vi ${c.vi ? "" : "empty"}"><span class="tag">${letters[k]}</span>${c.vi ? esc(c.vi) : "(không có bản dịch)"}</div>
+          <div class="row">
+            <span>Đúng nghĩa ${[0,1,2,3].map(v => `<label><input type="radio" name="m-${c.cid}" value="${v}"> ${v}</label>`).join(" ")}</span>
+            <span>Tự nhiên ${[0,1,2,3].map(v => `<label><input type="radio" name="n-${c.cid}" value="${v}"> ${v}</label>`).join(" ")}</span>
+            <label><input type="checkbox" name="s-${c.cid}"> Lỗi nặng</label>
+            <label><input type="radio" name="best" value="${c.cid}"> Tốt nhất</label>
+          </div>
+        </div>`).join("")}
+      <div class="row"><button class="primary" id="save">Lưu và tiếp</button><button id="skip">Bỏ qua</button><span id="msg" class="err"></span></div>
+    </section>`;
+  document.getElementById("save").onclick = save;
+  document.getElementById("skip").onclick = () => { idx = next(idx); show(); };
+}
+
+function next(from) {
+  for (let k = 1; k <= data.items.length; k++) { const j = (from + k) % data.items.length; if (!data.items[j].done) return j; }
+  return -1;
+}
+
+async function save() {
+  const it = data.items[idx];
+  const ratings = [];
+  for (const c of it.candidates) {
+    const m = document.querySelector(`input[name="m-${c.cid}"]:checked`);
+    const n = document.querySelector(`input[name="n-${c.cid}"]:checked`);
+    if (!m || !n) { document.getElementById("msg").textContent = "Hãy chấm đủ Đúng nghĩa và Tự nhiên cho mọi bản."; return; }
+    ratings.push({ cid: c.cid, meaning: +m.value, natural: +n.value, severe: document.querySelector(`input[name="s-${c.cid}"]`).checked });
+  }
+  const best = document.querySelector('input[name="best"]:checked')?.value;
+  const res = await fetch("/api/judge/score", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run, rater: raterEl.value.trim(), item: it.id, ratings, best }) });
+  if (!res.ok) { document.getElementById("msg").textContent = "Lưu lỗi: " + (await res.text()); return; }
+  it.done = true;
+  idx = next(idx);
+  show();
+}
+
+async function summary() {
+  const s = await fetch(`/api/judge/summary?run=${encodeURIComponent(run)}`).then(r => r.json());
+  const pct = v => (100 * v).toFixed(0) + "%";
+  main.innerHTML = `<section style="grid-column:1/-1">
+    <p>${s.raters} người chấm · ${s.judged} lượt chấm trên ${s.items} ô thoại${s.agreementOnBest != null ? ` · đồng ý về bản tốt nhất ${pct(s.agreementOnBest)}` : ""}</p>
+    <table><tr><th>Nguồn</th><th>Lượt</th><th>Đúng nghĩa (0–3)</th><th>Tự nhiên (0–3)</th><th>Lỗi nặng (khoảng 95%)</th><th>Được chọn tốt nhất</th></tr>
+    ${s.sources.sort((a, b) => b.meaning - a.meaning).map(x => `<tr><td>${esc(x.source)}</td><td>${x.ratings}</td><td>${x.meaning.toFixed(2)}</td><td>${x.natural.toFixed(2)}</td><td>${pct(x.severe)} (${pct(x.severeCi[0])}–${pct(x.severeCi[1])})</td><td>${pct(x.bestShare)}</td></tr>`).join("")}
+    </table>
+    <p class="help">Kết quả hiện tên model; trong lúc chấm thì không. <button onclick="start()">Quay lại chấm</button></p></section>`;
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+</script>
+</body>
+</html>

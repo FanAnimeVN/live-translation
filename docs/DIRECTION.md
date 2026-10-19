@@ -63,7 +63,7 @@ Code cũ không bị xóa: nằm trong `legacy/` và tag git `legacy-v0`.
 | Gemini 3.7 Flash | 31/81 | 23,9% | 4,30 s | 8,05 s | $0,0098 | 0 |
 
 Cách đọc: nhãn GT có lỗi (ví dụ nhãn ghi ぎっそく, ảnh là さっそく), nên CER chỉ là chỉ báo đọc chữ, **chưa phải điểm chất lượng dịch**. Một lượt mỗi model, chưa phải p95.
-**Quyết định cuối 19/10 (giá trước, rồi chất lượng và tốc độ):** mặc định **Claude Haiku 5.5** (~$0,001/trang; trên 25 trang của nhóm chrF 38,1 so với 38,4 của Gemini 3.1 Flash-Lite, CER 14,5% so với 19,6%, tự chấm 3 so với 8 lỗi nặng). Lựa chọn nhanh **DeepSeek V4.1 Flash 1017** (bóng đầu ~2,2 s, ghim nhà cung cấp InferenceNet/DeepInfra vì Relace giá $0,05/$0,15 đọc ảnh sai 58% ký tự). Gemini 3.1 Flash-Lite là tùy chọn chất lượng cao (đắt ~5 lần). Gemini 2.5 Flash-Lite/Flash bị loại (bỏ sót vùng, CER 37–44%). Chi tiết: [DEMO.md](DEMO.md).
+**Quyết định cuối 19/10 (giá trước, rồi chất lượng và tốc độ):** mặc định **Claude Haiku 5.5** (~$0,0013/trang đôi; trên 25 trang của nhóm chrF 38,1 so với 38,4 của DeepSeek 1017, CER 14,5% so với 19,6%, tự chấm 3 so với 8 lỗi nặng). Lựa chọn nhanh **DeepSeek V4.1 Flash 1017** (bóng đầu ~2,2 s, ghim nhà cung cấp InferenceNet/DeepInfra vì Relace giá $0,05/$0,15 đọc ảnh sai 58% ký tự). Gemini 3.1 Flash-Lite là tùy chọn chất lượng cao: cùng 25 trang chrF **43,4** (cao nhất), CER 16,3%, nhưng $0,0093/trang đôi (~7 lần Haiku) và bóng đầu p50 11 s. Nhóm chấm mù cả ba ở `/judge` để chốt. Gemini 2.5 Flash-Lite/Flash bị loại (bỏ sót vùng, CER 37–44%). Chi tiết: [DEMO.md](DEMO.md).
 
 **Ứng viên mới (19/10, một lượt, 10 trang, cùng điều kiện):** Gemini 3.8 Flash đọc chữ tốt nhất (CER 24,0%) nhưng ~$0,009/trang; MiMo-V2.6-Flash đọc kém nhất (CER 40%) và chậm (29 s/trang); Qwen3.7-Flash và Qwen3.8-Omni-Flash (chỉ Alibaba phục vụ) từ chối 2–3/10 trang truyện bình thường vì bộ lọc nội dung. Muse Spark loại vì giá và vì bản rẻ cho Meta dùng dữ liệu để huấn luyện.
 
@@ -103,6 +103,14 @@ Dịch thuần văn bản 120 bóng thoại của nhóm (chữ Nhật lấy từ
 Hy-MT2 dịch nhầm câu ngữ cảnh khi kèm "background" (chrF 7B tụt còn 26,3) → gọi từng câu riêng. Model dịch chữ không nhìn được tranh nên **không biết ai nói với ai** — chế độ local cần một model đọc ảnh (Qwen3-VL 8B / Qwen3.5 / Gemma 4 E4B đang tải, sẽ đo cùng điều kiện).
 
 Bộ nhớ truyện toàn cục và "P/S nhắc tình tiết": thiết kế ở [STORY-MEMORY.md](STORY-MEMORY.md).
+Backend cloud cho desktop và mobile: thiết kế ở [CLOUD.md](CLOUD.md).
+
+### Chấm mù cho nhóm
+
+Mở `http://127.0.0.1:8787/judge` khi server đang chạy. Mỗi ô thoại có viền đỏ trên ảnh cắt, kèm các bản dịch ẩn danh xếp
+thứ tự khác nhau cho từng người chấm: các model và **bản dịch của nhóm làm đối chứng ẩn**. Chấm Đúng nghĩa (0–3), Tự nhiên (0–3),
+Lỗi nặng, chọn bản tốt nhất; nút **Kết quả** cho trung bình, tỉ lệ lỗi nặng kèm khoảng tin cậy 95% và mức đồng ý giữa người chấm.
+Bộ hiện có: 419 ô thoại trên 25 trang của nhóm (`?run=team25`). Điểm lưu ở `.private/judge/` (không commit); ảnh không rời máy.
 
 ## 5. Tính năng theo mốc
 
