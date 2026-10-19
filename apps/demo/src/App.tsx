@@ -105,8 +105,9 @@ export function App() {
     async (p: PageInfo) => {
       patch(p.id, () => ({ regions: [], translations: {}, status: "detecting", live: {} }));
       const t0 = performance.now();
+      const key = `${p.id}|${model}`;
       try {
-        await translateStream({ pageId: p.id, model, ns: NS }, (e) => {
+        await translateStream({ pageId: p.id, model, ns: NS, inpaint: inpaintOn }, (e) => {
           if (e.type === "detected")
             patch(p.id, (s) => ({ ...s, regions: e.regions, status: "translating", live: { detectMs: e.detectMs } }));
           else if (e.type === "region")
@@ -116,6 +117,14 @@ export function App() {
               live: { ...s.live, firstMs: s.live?.firstMs ?? performance.now() - t0 },
             }));
           else if (e.type === "regions-added") patch(p.id, (s) => ({ ...s, regions: [...s.regions, ...e.regions] }));
+          else if (e.type === "patches") {
+            // Backgrounds reconstructed while the model was still translating.
+            e.patches.forEach((x) => requested.current.add(`${key}|${x.id}`));
+            void loadPatchImages(e.patches).then((loaded) => {
+              setPatches((all) => ({ ...all, [key]: { ...all[key], ...loaded } }));
+              setInpaintInfo((m) => ({ ...m, [key]: `Đã vẽ lại nền cho ${e.patches.length} vùng ngay trong lúc dịch (${e.ms} ms, trên máy, không tốn API)` }));
+            });
+          }
           else if (e.type === "done") patch(p.id, (s) => ({ ...s, result: e.result, regions: e.result.regions, translations: e.result.translations, status: "done" }));
           else if (e.type === "error") patch(p.id, (s) => ({ ...s, status: "error", error: friendlyError(e.message, e.code) }));
         });
@@ -125,7 +134,7 @@ export function App() {
       void api.budget().then(setBudget);
       void api.memory(p.seriesId, NS, p.title).then(setMemory);
     },
-    [model, patch],
+    [model, patch, inpaintOn],
   );
 
   const translateChapter = async () => {
@@ -158,21 +167,7 @@ export function App() {
       setInpaintInfo((m) => ({ ...m, [key]: `Đang vẽ lại nền tranh cho ${fresh.length} vùng (MI-GAN, trên máy)…` }));
       try {
         const res = await api.inpaint({ pageId, model, ns: NS, ids: fresh });
-        const loaded: Record<string, PatchImage> = {};
-        await Promise.all(
-          res.patches.map(
-            (p) =>
-              new Promise<void>((resolve) => {
-                const im = new Image();
-                im.onload = () => {
-                  loaded[p.id] = { x: p.x, y: p.y, image: im, textBoxes: p.textBoxes, textExtent: p.textExtent };
-                  resolve();
-                };
-                im.onerror = () => resolve();
-                im.src = p.dataUrl;
-              }),
-          ),
-        );
+        const loaded = await loadPatchImages(res.patches);
         setPatches((all) => ({ ...all, [key]: { ...all[key], ...loaded } }));
         setInpaintInfo((m) => ({ ...m, [key]: `Đã vẽ lại nền cho ${res.patches.length} vùng trong ${res.ms} ms (trên máy, không tốn API)` }));
       } catch (e) {
@@ -518,6 +513,28 @@ function Viewer(props: {
       </div>
     </div>
   );
+}
+
+/** Decode reconstructed-background patches (data URLs) into drawable images. */
+async function loadPatchImages(
+  patches: Array<{ id: string; x: number; y: number; dataUrl: string; textBoxes?: PatchImage["textBoxes"]; textExtent?: PatchImage["textExtent"] }>,
+): Promise<Record<string, PatchImage>> {
+  const loaded: Record<string, PatchImage> = {};
+  await Promise.all(
+    patches.map(
+      (p) =>
+        new Promise<void>((resolve) => {
+          const im = new Image();
+          im.onload = () => {
+            loaded[p.id] = { x: p.x, y: p.y, image: im, textBoxes: p.textBoxes, textExtent: p.textExtent };
+            resolve();
+          };
+          im.onerror = () => resolve();
+          im.src = p.dataUrl;
+        }),
+    ),
+  );
+  return loaded;
 }
 
 const fmt = (ms?: number) => (ms === undefined ? "—" : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`);

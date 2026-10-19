@@ -12,8 +12,9 @@ export interface ModelInfo {
 }
 
 export const MODELS: ModelInfo[] = [
+  { id: "google/gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite (chất lượng)", tier: "fast", inUsd: 0.25, outUsd: 1.5, extra: { reasoning: { effort: "low" } } },
+  { id: "deepseek/deepseek-v4.1-flash-1017", label: "DeepSeek V4.1 Flash 1017 (nhanh)", tier: "cheap", inUsd: 0.15, outUsd: 0.6, extra: { reasoning: { enabled: false } } },
   { id: "anthropic/claude-haiku-5.5", label: "Claude Haiku 5.5", tier: "fast", inUsd: 0.1, outUsd: 0.5, noSampling: true, extra: { reasoning: { enabled: false } } },
-  { id: "google/gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite", tier: "fast", inUsd: 0.25, outUsd: 1.5, extra: { reasoning: { effort: "low" } } },
   { id: "deepseek/deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash", tier: "cheap", inUsd: 0.063, outUsd: 0.12, extra: { reasoning: { enabled: false } } },
   { id: "qwen/qwen3-vl-235b-a22b-instruct", label: "Qwen3-VL 235B", tier: "cheap", inUsd: 0.21, outUsd: 1.9 },
   { id: "google/gemini-3.7-flash", label: "Gemini 3.7 Flash", tier: "quality", inUsd: 0.75, outUsd: 3.75, extra: { reasoning: { effort: "low" } } },
@@ -27,7 +28,12 @@ export const MODELS: ModelInfo[] = [
   { id: "mock/sample", label: "Mock (offline, bản dịch giả để thử dàn chữ)", tier: "free", inUsd: 0, outUsd: 0 },
 ];
 
-export const DEFAULT_MODEL = MODELS[0].id;
+/**
+ * Default reader/translator, chosen on 2026-10-19 by a blind judge over the 10 GT pages:
+ * fewest severe meaning errors (4%) at ~$0.005/page. DeepSeek V4.1 Flash 1017 is the fast
+ * option (~3 s to the first bubble, 15% severe errors); see docs/DIRECTION.md.
+ */
+export const DEFAULT_MODEL = "google/gemini-3.1-flash-lite";
 
 export function modelInfo(id: string): ModelInfo {
   return MODELS.find((m) => m.id === id) ?? { id, label: id, tier: "cheap", inUsd: 1, outUsd: 5 };

@@ -17,14 +17,15 @@ const arg = (name: string, def: string) => {
   return i > 0 ? process.argv[i + 1] : def;
 };
 const DEFAULT_MODELS = [
-  "anthropic/claude-haiku-5.5",
   "google/gemini-3.1-flash-lite",
-  "qwen/qwen3-vl-235b-a22b-instruct",
-  "deepseek/deepseek-v4.1-flash",
-  "google/gemini-3.7-flash",
+  "deepseek/deepseek-v4.1-flash-1017",
+  "anthropic/claude-haiku-5.5",
+  "google/gemini-3.8-flash",
 ];
 const models = arg("models", DEFAULT_MODELS.join(",")).split(",").filter(Boolean);
 const runs = Number(arg("runs", "1"));
+// Request fields applied to every model in this run, e.g. --extra '{"reasoning":{"enabled":false}}'.
+const extra = arg("extra", "") ? (JSON.parse(arg("extra", "{}")) as Record<string, unknown>) : undefined;
 const only = arg("pages", "").split(",").filter(Boolean);
 const runId = arg("run", new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19));
 const safe = (s: string) => s.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -67,7 +68,7 @@ for (const model of models) {
       try {
         const result = await translatePage(
           { id: page.id, title: page.title, seriesId: page.seriesId, position: page.position, bytes: await readPageImage(page) },
-          { model, memory },
+          { model, memory, extra },
         );
         memories.set(page.seriesId, mergePage(memory, page.id, page.position, result.notes, Object.values(result.translations)).memory);
         if (run === 1) await writeFile(join(dir, `${safe(page.id)}.json`), JSON.stringify(result), "utf8");

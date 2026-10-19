@@ -1,0 +1,68 @@
+# Demo cho nhóm — Live translation (19/10/2026)
+
+Mục tiêu 12–15 phút: cho nhóm thấy bản dịch chạy thật, chữ hòa vào tranh, bộ nhớ truyện, và các con số đo được; sau đó thống nhất hướng đi và phân công.
+
+## Chuẩn bị (10 phút trước giờ demo)
+
+1. Đóng ứng dụng nặng; ổ C: càng trống càng tốt (máy đang thiếu bộ nhớ ảo).
+2. Mở hai cửa sổ terminal ở thư mục dự án:
+   ```bash
+   npm run demo
+   ```
+   ```bash
+   npm run server
+   ```
+   Giữ cửa sổ server mở suốt buổi demo.
+3. Vẽ sẵn nền tranh cho các trang đã dịch (chạy trên máy, không tốn API, ~1 phút):
+   ```bash
+   npx tsx tools/eval/src/prepare-demo.ts --warm
+   ```
+4. Mở http://127.0.0.1:8787 — chọn trang bất kỳ: trang mở ngay từ bản dịch đã lưu (Gemini 3.1 Flash-Lite, đã dịch cả chương có bộ nhớ).
+
+Muốn dịch lại cả chương từ bộ nhớ sạch (~2 phút, ~$0,06): `npx tsx tools/eval/src/prepare-demo.ts`.
+
+## Kịch bản
+
+| Phút | Làm gì | Nói gì |
+|---|---|---|
+| 1 | Giới thiệu | Mở manga raw tiếng Nhật, đọc tiếng Việt như bản scan làm sẵn: đúng nghĩa, chữ hòa vào tranh, nhớ truyện, không spoil. |
+| 2 | Trang 5 (đã dịch sẵn). Giữ **Space** để so bản gốc ↔ bản dịch | Chữ trong bóng nổ, chữ trên nền tranh được xóa và vẽ lại bằng MI-GAN chạy trên máy; tranh không bị hỏng (nét vẽ, mắt nhân vật được bảo vệ); tiếng động (SFX) giữ nguyên như bản scan, bấm vào vẫn xem được nghĩa. |
+| 2 | Chọn model **DeepSeek V4.1 Flash 1017 (nhanh)**, mở trang 7, bấm **Dịch lại trang** | Bóng hiện dần sau ~3 giây; nền tranh được vẽ lại song song trong lúc model dịch; tab **Số đo**: thời gian, token, chi phí (~$0,0007/trang). |
+| 2 | Bấm một bóng thoại | Chữ Nhật gốc, bản dịch, người nói → người nghe; sửa bản dịch ngay tại chỗ. |
+| 2 | Tab **Bộ nhớ truyện** | Nhân vật, cách xưng hô có hướng A→B, nút Đúng/Đổi/Bỏ; tóm tắt chạy nền bằng model rẻ; đọc lại trang cũ không lộ diễn biến sau. |
+| 2 | Bảng số đo bên dưới | Vì sao chọn model này; chi phí; tốc độ. |
+| 1 | Giới hạn và kế hoạch | Mục "Còn thiếu" và lộ trình. |
+
+## Số đo thật (bộ GT 10 trang, 19/10)
+
+| Hạng mục | Kết quả |
+|---|---|
+| Tìm vùng chữ | 81/81 vùng có nhãn |
+| Dàn chữ | 93/93 vùng dịch được đều vẽ lại; tràn 0, chồng chữ 0, lọt ngoài bóng 0; 4 vùng còn vết nhạt trên nền gạch chéo dày |
+| Vẽ lại nền tranh | ~1,1 s/vùng trên CPU, chạy song song với lúc dịch; mở lại trang từ bộ nhớ RAM của server: tức thì |
+| Mở lại trang đã dịch | ~3 ms (không gọi model) |
+| Bộ nhớ truyện | Mỗi trang gửi tối đa ~2.100 token bộ nhớ; thử truyện 1.000 chương / 300 nhân vật vẫn trong trần |
+
+Chấm mù chất lượng dịch (109 vùng, giám khảo GPT-5.6, tên model bị ẩn và xáo trộn mỗi trang; một lượt, là tín hiệu sàng lọc, chưa thay được người chấm):
+
+| Model | Đúng nghĩa (0–3) | Lỗi nghiêm trọng | Bóng đầu (trung vị) | Cả trang | $/trang |
+|---|---|---|---|---|---|
+| Gemini 3.1 Flash-Lite (mặc định) | **2,64** | 4% | 10,6 s | 12,1 s | $0,0048 |
+| Gemini 3.8 Flash | 2,59 | **3%** | 7,6 s | 11,5 s | $0,0094 |
+| Claude Haiku 5.5 | 2,50 | 9% | 5,1 s | 9,0 s | $0,0009 |
+| DeepSeek V4.1 Flash 1017 (nhanh) | 2,28 | 15% | **2,8 s** | **6,6 s** | **$0,0007** |
+| DeepSeek V4.1 Flash | 1,75 | 33% | 3,4 s | 8,5 s | $0,0019 |
+
+Tóm tắt truyện chạy nền: DeepSeek V4.1 Flash 1017 trung thành nhất trong 5 model (chấm mù, cùng đầu vào).
+
+## Còn thiếu (nói thẳng)
+
+- Chưa chạy trên trang web thật: extension Chrome/Edge là mốc tiếp theo.
+- Tốc độ chưa đạt mục tiêu p95 (bóng đầu < 5 s, trang < 8 s); hướng xử lý: dịch trước trang kế, model nhanh cho trang đang chờ.
+- Chất lượng dịch mới được AI chấm; cần nhóm chấm mù để chốt.
+- Nhãn chữ rất nhỏ nằm ngoài vùng (tên nhân vật cạnh hình) mới hiện dưới dạng ghi chú.
+- Bộ dữ liệu lớn: chờ quyền Manga109-s; OpenMantra (CC BY-NC 4.0, 214 trang, có bản dịch Anh) dùng được ngay cho đồ án.
+
+## Bản quyền
+
+Ảnh Manga109 chỉ dùng cho học thuật: demo chạy trên máy, không đăng ảnh lên mạng, slide ghi "courtesy of [tác giả]".

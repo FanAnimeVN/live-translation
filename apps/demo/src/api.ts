@@ -46,7 +46,7 @@ export const api = {
 
 /** POST /api/translate and dispatch each NDJSON event as it streams in. */
 export async function translateStream(
-  body: { pageId: string; model: string; ns: string },
+  body: { pageId: string; model: string; ns: string; inpaint?: boolean },
   onEvent: (e: TranslateEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {

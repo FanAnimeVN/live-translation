@@ -18,7 +18,8 @@ import {
 import { streamChat } from "./openrouter";
 
 /** Cheap text model for background work (summaries, profiles). */
-export const BACKGROUND_MODEL = process.env.BACKGROUND_MODEL ?? "deepseek/deepseek-v4.1-flash";
+/** Chosen by a blind faithfulness judge on identical input (2026-10-19): fewest invented facts, ~10 s, ~$0.0005 per update. */
+export const BACKGROUND_MODEL = process.env.BACKGROUND_MODEL ?? "deepseek/deepseek-v4.1-flash-1017";
 /** Summarize once this many dialogue lines have been read since the last update. */
 export const UPDATE_EVERY_LINES = 24;
 

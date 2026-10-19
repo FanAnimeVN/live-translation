@@ -46,6 +46,10 @@ export interface TranslateOptions {
   signal?: AbortSignal;
   /** Attach zoomed crops: "small" regions only (default), "all" or "none". */
   crops?: "small" | "all" | "none";
+  /** Request fields applied after the model's defaults (e.g. a reasoning setting under test). */
+  extra?: Record<string, unknown>;
+  /** Called once regions are known, before the model call: work that needs no translation starts here. */
+  onDetected?: (page: DecodedPage, regions: TextRegion[]) => void;
 }
 
 /**
@@ -59,6 +63,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
   const det = await detect(decoded);
   const regions = det.regions;
   emit({ type: "detected", pageId: page.id, image: { w: decoded.w, h: decoded.h }, regions, detectMs: det.ms });
+  opts.onDetected?.(decoded, regions);
 
   const translations: Record<string, RegionTranslation> = {};
   const notes: PageNotes = { names: [], address: [], missed: [] };
@@ -103,6 +108,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
       purpose: onlyIds ? "repair" : "translate-page",
       pageId: page.id,
       signal: opts.signal,
+      extra: opts.extra,
       onText: (d) => parser.push(d),
     });
     ttfbMs ??= stats.ttfbMs;

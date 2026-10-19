@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
-import { mergePage, setEntityStatus, type EntryStatus, type TranslateEvent } from "@lt/core";
+import { mergePage, setEntityStatus, type EntryStatus, type PatchData, type TextRegion, type TranslateEvent } from "@lt/core";
 import { getPage, listPages, readPageImage } from "./dataset";
 import { env, ROOT } from "./env";
 import { spentUsd } from "./ledger";
@@ -9,6 +9,8 @@ import { DEFAULT_MODEL, MODELS } from "./models";
 import { translatePage } from "./pipeline";
 import { decodeImage } from "./image";
 import { charSizesFor, inpaintRegions, type Rejected } from "./inpaint";
+import { predictInpaint } from "@lt/render";
+import type { DecodedPage } from "./image";
 import { applyPlanned, bootstrapFromMetadata, planMemoryUpdate, searchSeries, UPDATE_EVERY_LINES } from "./context";
 import { loadResult, saveResult } from "./results";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -100,7 +102,7 @@ app.post("/api/memory/reset", async (c) => {
 });
 
 app.post("/api/translate", async (c) => {
-  const body = await c.req.json<{ pageId: string; model?: string; ns?: string; crops?: "small" | "all" | "none" }>();
+  const body = await c.req.json<{ pageId: string; model?: string; ns?: string; crops?: "small" | "all" | "none"; inpaint?: boolean }>();
   const model = body.model || DEFAULT_MODEL;
   const ns = body.ns ?? "demo";
   const page = await getPage(body.pageId);
@@ -110,18 +112,37 @@ app.post("/api/translate", async (c) => {
     const write = (e: TranslateEvent) => s.write(JSON.stringify(e) + "\n");
     const abort = new AbortController();
     s.onAbort(() => abort.abort());
+    // Text on artwork needs a reconstructed background, and that needs no translation:
+    // run MI-GAN locally while the model is still reading, and stream the patches.
+    let speculative: Promise<void> | undefined;
+    const onDetected = (decoded: DecodedPage, regions: TextRegion[]) => {
+      if (body.inpaint === false) return;
+      speculative = (async () => {
+        const t0 = performance.now();
+        // Let the page image be encoded and the model request go out first: the
+        // prediction below is synchronous work that would delay the upload.
+        await new Promise((r) => setTimeout(r, 300));
+        const ids = predictInpaint(decoded.ctx.getImageData(0, 0, decoded.w, decoded.h), regions);
+        if (!ids.length) return;
+        const patches = await inpaintRegions(decoded, regions.filter((r) => ids.includes(r.id)));
+        rememberPatches(page.id, regions, patches);
+        if (!abort.signal.aborted) await write({ type: "patches", patches, ms: Math.round(performance.now() - t0) });
+      })().catch((e) => console.error("speculative inpaint failed:", (e as Error).message));
+    };
     try {
       await serial(`${ns}:${page.seriesId}`, async () => {
         const memory = await loadMemory(ns, page.seriesId, page.title);
         const result = await translatePage(
           { id: page.id, title: page.title, seriesId: page.seriesId, position: page.position, bytes: await readPageImage(page) },
-          { model, memory, emit: (e) => void write(e), signal: abort.signal, crops: body.crops },
+          { model, memory, emit: (e) => void write(e), signal: abort.signal, crops: body.crops, onDetected },
         );
         const merged = mergePage(memory, page.id, page.position, result.notes, Object.values(result.translations));
         await saveMemory(ns, merged.memory);
         await saveResult(ns, result);
         if ((merged.memory.pending?.length ?? 0) >= UPDATE_EVERY_LINES) void backgroundUpdate(ns, page.seriesId, page.title, false);
       });
+      // Keep the stream open until the patches are out (they usually finish first).
+      await speculative;
     } catch (e) {
       const err = e as { message?: string; code?: string };
       await write({ type: "error", message: err.message ?? String(e), code: err.code });
@@ -129,8 +150,22 @@ app.post("/api/translate", async (c) => {
   });
 });
 
+// Reconstructed backgrounds are image data: kept in this process's memory only (never on
+// disk), keyed by page and region geometry, so reopening a page does not run MI-GAN again.
+const patchCache = new Map<string, PatchData>();
+const PATCH_CACHE_MAX = 400;
+const patchKey = (pageId: string, r: TextRegion) => `${pageId}|${[r.box.x, r.box.y, r.box.w, r.box.h].map(Math.round).join(",")}`;
+function rememberPatches(pageId: string, regions: TextRegion[], patches: PatchData[]) {
+  for (const p of patches) {
+    const r = regions.find((x) => x.id === p.id);
+    if (!r) continue;
+    patchCache.delete(patchKey(pageId, r));
+    patchCache.set(patchKey(pageId, r), p);
+    while (patchCache.size > PATCH_CACHE_MAX) patchCache.delete(patchCache.keys().next().value!);
+  }
+}
+
 // Local reconstruction of art under text (MI-GAN on this machine): no API call, no cost.
-// Patches are image data derived from the page, so they are returned once and never stored.
 app.post("/api/inpaint", async (c) => {
   const { pageId, model = DEFAULT_MODEL, ns = "demo", ids } = await c.req.json<{ pageId: string; model?: string; ns?: string; ids: string[] }>();
   const page = await getPage(pageId);
@@ -138,11 +173,20 @@ app.post("/api/inpaint", async (c) => {
   const regions = (result?.regions ?? []).filter((r) => ids.includes(r.id));
   if (!regions.length) return c.json({ patches: [], ms: 0 });
   const t0 = performance.now();
-  const decoded = await decodeImage(await readPageImage(page));
+  const cached = regions.flatMap((r) => {
+    const p = patchCache.get(patchKey(pageId, r));
+    return p ? [{ ...p, id: r.id }] : [];
+  });
+  const missing = regions.filter((r) => !cached.some((p) => p.id === r.id));
   const rejected: Rejected[] = [];
-  const patches = await inpaintRegions(decoded, regions, result ? charSizesFor(result) : {}, rejected);
+  let fresh: PatchData[] = [];
+  if (missing.length) {
+    const decoded = await decodeImage(await readPageImage(page));
+    fresh = await inpaintRegions(decoded, missing, result ? charSizesFor(result) : {}, rejected);
+    rememberPatches(pageId, missing, fresh);
+  }
   c.header("Cache-Control", "no-store");
-  return c.json({ patches, rejected, ms: Math.round(performance.now() - t0) });
+  return c.json({ patches: [...cached, ...fresh], rejected, ms: Math.round(performance.now() - t0), fromMemory: cached.length });
 });
 
 // ---------------------------------------------------------------- context management

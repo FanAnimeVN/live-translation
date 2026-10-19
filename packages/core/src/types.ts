@@ -132,11 +132,30 @@ export interface PageResult {
   createdAt: string;
 }
 
+/** A reconstructed background for one region: a transparent PNG with only the hole painted. */
+export interface PatchData {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Kept in memory only, never written to disk. */
+  dataUrl: string;
+  coverage: number;
+  ms: number;
+  /** Text boxes the hole was built from (tighter than the region box for small free text). */
+  textBoxes: Box[];
+  /** Bounds of the glyph strokes that were removed: where the original text really sat. */
+  textExtent?: Box;
+}
+
 export type TranslateEvent =
   | { type: "detected"; pageId: string; image: { w: number; h: number }; regions: TextRegion[]; detectMs: number }
   | { type: "region"; t: RegionTranslation; atMs: number }
   | { type: "notes"; notes: PageNotes }
   /** Text the reader model found outside every detected region, located and added after the page. */
   | { type: "regions-added"; regions: TextRegion[] }
+  /** Backgrounds reconstructed while the page was being translated (image data, never stored). */
+  | { type: "patches"; patches: PatchData[]; ms: number }
   | { type: "done"; result: PageResult }
   | { type: "error"; message: string; code?: string };

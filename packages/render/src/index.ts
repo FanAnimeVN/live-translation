@@ -126,6 +126,26 @@ interface Job {
 }
 
 /**
+ * Which regions will need a reconstructed background? The same erase test as
+ * `renderTranslation`, run on a copy before any translation exists, so inpainting can
+ * start while the reader model is still translating. Roles are not known yet: a sound
+ * effect predicted here simply never uses its patch, and a region the final render
+ * still needs is requested afterwards as before.
+ */
+export function predictInpaint(img: RGBAImage, regions: TextRegion[]): string[] {
+  const copy: RGBAImage = { width: img.width, height: img.height, data: new Uint8ClampedArray(img.data) };
+  const out: string[] = [];
+  for (const r of regions) {
+    const snap = snapshot(copy, r.bubble ? unionBox([...r.members, r.bubble]) : expand(unionBox(r.members), 6));
+    const erase = eraseRegion(copy, r.members, { bubble: r.bubble, mode: r.bubble ? "auto" : "glyph", maxMid: r.bubble ? MAX_MID_BUBBLE : MAX_MID_FREE });
+    const needs = erase.mode === "skipped" || glyphResidue(copy, r.members) > MAX_RESIDUE;
+    restore(copy, snap);
+    if (needs) out.push(r.id);
+  }
+  return out;
+}
+
+/**
  * Erase the source text and letter the Vietnamese translation in place. The page must
  * already be painted on `ctx` (original pixels); "view original" is simply redrawing.
  * Nothing is lettered over leftover Japanese: a region whose erasure leaves ink behind

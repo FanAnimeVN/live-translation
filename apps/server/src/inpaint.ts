@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as ort from "onnxruntime-node";
 import { createCanvas } from "@napi-rs/canvas";
-import { area, artTextMask, clampBox, containment, expand, glyphResidue, patchBlends, roundBox, type Box, type InpaintJob, type PageResult, type RGBAImage, type TextRegion } from "@lt/core";
+import { area, artTextMask, clampBox, containment, expand, glyphResidue, patchBlends, roundBox, type Box, type InpaintJob, type PageResult, type PatchData, type RGBAImage, type TextRegion } from "@lt/core";
 import { detectInCrop } from "./detector";
 import { ROOT } from "./env";
 import type { DecodedPage } from "./image";
@@ -24,21 +24,7 @@ export function loadInpainter(): Promise<ort.InferenceSession> {
   return session;
 }
 
-export interface Patch {
-  id: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  /** PNG of the reconstructed crop (kept in memory only, never written to disk). */
-  dataUrl: string;
-  coverage: number;
-  ms: number;
-  /** The text boxes the hole was built from (tighter than the region box for small free text). */
-  textBoxes: Box[];
-  /** Bounds of the glyph strokes that were removed: where the original text really sat. */
-  textExtent?: Box;
-}
+export type Patch = PatchData;
 
 /** Diagnostics for a reconstruction that needed the fallback (the text is still redrawn). */
 export interface Rejected {
