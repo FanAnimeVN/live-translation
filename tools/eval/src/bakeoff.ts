@@ -92,7 +92,8 @@ summary.spentUsdTotal = await spentUsd();
 summary.blind = blind;
 await mkdir(outDir, { recursive: true });
 await writeFile(join(outDir, "summary.json"), JSON.stringify(summary, null, 1), "utf8");
-await writeFile(join(PRIVATE_DIR, "eval", "latest.json"), JSON.stringify(summary), "utf8");
+// The demo shows latest.json; a latency-only rerun must not replace the model comparison.
+if (!process.argv.includes("--no-latest")) await writeFile(join(PRIVATE_DIR, "eval", "latest.json"), JSON.stringify(summary), "utf8");
 printTable(summary.models as Record<string, ReturnType<typeof aggregate>>);
 console.log(`\nWritten ${outDir}. Ledger total $${(summary.spentUsdTotal as number).toFixed(4)}`);
 
@@ -166,8 +167,8 @@ function aggregate(model: string, scores: PageScore[]) {
     gtExact: `${sum1("exact")}/${sum1("gt")}`,
     gtFound: `${sum1("gtFound")}/${sum1("gt")}`,
     cerVsLabels: sum1("refLen") ? sum1("edits") / sum1("refLen") : null,
-    firstRegionMs: { p50: percentile(first, 0.5), p90: percentile(first, 0.9), n: first.length },
-    pageMs: { p50: percentile(total, 0.5), p90: percentile(total, 0.9), n: total.length },
+    firstRegionMs: { p50: percentile(first, 0.5), p90: percentile(first, 0.9), p95: percentile(first, 0.95), n: first.length },
+    pageMs: { p50: percentile(total, 0.5), p90: percentile(total, 0.9), p95: percentile(total, 0.95), n: total.length },
     costPerPageUsd: ok.length ? sum("costUsd") / ok.length : null,
     costTotalUsd: sum("costUsd"),
     roles: firstRun.reduce<Record<string, number>>((m, s) => {

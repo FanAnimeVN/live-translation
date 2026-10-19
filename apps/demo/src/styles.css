@@ -105,3 +105,5 @@ h5 { margin: 10px 0 2px; }
 .metrics td { border-bottom: 1px solid var(--line); padding: 5px 4px; font-variant-numeric: tabular-nums; }
 .metrics td:first-child { color: var(--muted); }
 .toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.marker.needs-inpaint { background: #9ca3af; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.45; } }

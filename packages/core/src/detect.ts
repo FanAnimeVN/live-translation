@@ -46,18 +46,37 @@ export function suppressDuplicates(dets: Detection[], iouThr = 0.5): Detection[]
 const isText = (d: Detection) => d.cls !== "bubble";
 const sameFamily = (a: Detection, b: Detection) => isText(a) === isText(b);
 
+export interface RegionOptions {
+  /** Text and bubble boxes at or above this score always count. */
+  minScore?: number;
+  /** A weaker text box still counts when a confident bubble contains it. */
+  minScoreInBubble?: number;
+  /** A bubble this confident becomes a region even with no text box inside: the reader model confirms or marks it empty. */
+  lonelyBubble?: number;
+}
+
+/** A bubble this sure vouches for faint text inside it. */
+const CONFIDENT_BUBBLE = 0.5;
+
 /**
  * Turn raw detections into text regions: merge overlapping text boxes, attach the
  * containing bubble, merge text boxes that share one bubble, and number them in
  * reading order. Raw detections stay available to callers for diagnostics.
+ * Text in a bubble is easy to under-score (a lone "!" or a tiny scribble), so a
+ * confident bubble lowers the bar for text inside it and, empty-handed, still becomes a
+ * region for the reader model to check: dropping it would silently lose a line.
  */
-export function buildRegions(dets: Detection[]): TextRegion[] {
+export function buildRegions(dets: Detection[], opts: RegionOptions = {}): TextRegion[] {
+  const minScore = opts.minScore ?? 0;
+  const minInBubble = Math.min(minScore, opts.minScoreInBubble ?? minScore);
   const clean = suppressDuplicates(dets);
-  const bubbles = clean.filter((d) => d.cls === "bubble");
-  type Group = { box: Box; members: Box[]; score: number; inBubbleClass: boolean; bubble?: Box };
-  let groups: Group[] = clean
+  const bubbles = clean.filter((d) => d.cls === "bubble" && d.score >= minScore);
+  const vouching = bubbles.filter((b) => b.score >= CONFIDENT_BUBBLE);
+  const texts = clean
     .filter(isText)
-    .map((d) => ({ box: d.box, members: [d.box], score: d.score, inBubbleClass: d.cls === "text_bubble" }));
+    .filter((d) => d.score >= minScore || (d.score >= minInBubble && vouching.some((b) => containment(d.box, b.box) >= 0.6)));
+  type Group = { box: Box; members: Box[]; score: number; inBubbleClass: boolean; bubble?: Box };
+  let groups: Group[] = texts.map((d) => ({ box: d.box, members: [d.box], score: d.score, inBubbleClass: d.cls === "text_bubble" }));
 
   // Merge overlapping text boxes (cross-class duplicates, split columns).
   let changed = true;
@@ -91,6 +110,14 @@ export function buildRegions(dets: Detection[]): TextRegion[] {
     if (best && bestCover >= 0.6) g.bubble = best;
   }
 
+  // Confident bubbles with no text box at all: the inner area becomes a region.
+  for (const b of bubbles) {
+    if (b.score < (opts.lonelyBubble ?? Infinity)) continue;
+    if (groups.some((g) => g.bubble === b.box || containment(g.box, b.box) > 0.3)) continue;
+    const inner = insetBox(b.box, 0.18);
+    groups.push({ box: inner, members: [inner], score: Math.round(b.score * 500) / 1000, inBubbleClass: true, bubble: b.box });
+  }
+
   // One bubble = one region: merge text groups sharing the same bubble.
   const byBubble = new Map<Box, Group>();
   const merged: Group[] = [];
@@ -108,6 +135,17 @@ export function buildRegions(dets: Detection[]): TextRegion[] {
     } else {
       byBubble.set(g.bubble, g);
       merged.push(g);
+    }
+  }
+  // A "text" box that is really the whole balloon (the detector sometimes repeats the
+  // bubble as text) would erase everything inside a burst's spikes: drop it whenever a
+  // tighter text box sits in the same balloon.
+  for (const g of merged) {
+    if (!g.bubble || g.members.length < 2) continue;
+    const tight = g.members.filter((m) => iou(m, g.bubble!) < 0.8);
+    if (tight.length && tight.length < g.members.length) {
+      g.members = tight;
+      g.box = tight.reduce((a, m) => union(a, m));
     }
   }
   groups = merged;
@@ -135,6 +173,10 @@ export function buildRegions(dets: Detection[]): TextRegion[] {
       bubble: a.bubble ?? b.bubble,
     };
   }
+}
+
+function insetBox(b: Box, f: number): Box {
+  return { x: b.x + b.w * f, y: b.y + b.h * f, w: b.w * (1 - 2 * f), h: b.h * (1 - 2 * f) };
 }
 
 /** Small or thin regions get a zoomed crop in the model request. */

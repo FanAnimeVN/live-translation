@@ -1,6 +1,6 @@
 # Hướng đi mới — Live translation
 
-Cập nhật 18/10/2026. Tài liệu cho buổi họp nhóm: thống nhất sản phẩm, kiến trúc, lộ trình và phân công.
+Cập nhật 19/10/2026. Tài liệu cho buổi họp nhóm: thống nhất sản phẩm, kiến trúc, lộ trình và phân công.
 Đặc tả mong muốn đầy đủ: [WISH-FINAL-APP.md](reference/WISH-FINAL-APP.md).
 
 ## 1. Sản phẩm trong một câu
@@ -41,13 +41,15 @@ Code cũ không bị xóa: nằm trong `legacy/` và tag git `legacy-v0`.
 
 | Hạng mục | Kết quả | Điều kiện đo |
 |---|---|---|
-| Tìm vùng chữ trên bộ ground truth | **80/81 vùng (98,8%)** | 10 trang, ngưỡng điểm 0,3; sót 1 vùng ở trang 2 |
-| Thời gian tìm vùng | ~0,37 s/trang khi đã warm, 1,2 s lần đầu | CPU Ryzen 7 7840H, onnxruntime 4 luồng |
+| Tìm vùng chữ trên bộ ground truth | **81/81 vùng (100%)** | 10 trang; bóng thoại chắc chắn (≥ 0,5) giữ cả chữ mờ bên trong (bóng chỉ có dấu "!" trước đây bị bỏ) |
+| Thời gian tìm vùng | ~0,28–0,37 s/trang khi đã warm, ~1 s lần đầu | CPU Ryzen 7 7840H, onnxruntime 4 luồng |
 | Dịch thật cả trang (5 model × 10 trang) | **107/107 vùng có bản dịch với mọi model**, 0 trang lỗi | Một lượt mỗi model, cùng detector, prompt và luồng bộ nhớ; tổng chi phí $0,20 |
 | Xóa chữ trong bóng thoại | Loang lấy lòng bóng (flood fill): giữ viền bóng và tranh ngoài bóng | |
-| Xóa chữ trên nền tranh | **Inpainting MI-GAN chạy trên máy** (MIT, 28 MB, không tốn API), ~0,4–1 s/vùng trên CPU | Có cổng chất lượng: patch phẳng giữa nền nhiều nét bị loại, giữ nguyên tranh kèm dấu xem bản dịch |
-| Demo trên trình duyệt | Trang 4: 15/15 vùng; bóng đầu 5,4 s; cả trang 9,6 s; $0,00115; vẽ lại nền 7 vùng trong 7,1 s | Một lượt, Claude Haiku 5.5, máy đang thiếu bộ nhớ ảo |
-| Unit test lõi | 13/13 pass | |
+| Xóa chữ trên nền tranh | **Luôn vẽ lại bằng MI-GAN trên máy** (MIT, không tốn API), ~1,1 s/vùng trên CPU | Mask chỉ lấy nét chữ: mắt, mảng tô đặc và nét tranh cắt ngang khung chữ được bảo vệ; chữ nhỏ được dò lại khung trên ảnh phóng to |
+| Demo trên trình duyệt | Trang 7: 11/11 vùng; bóng đầu 7,1 s; $0,00099; vẽ lại nền 2 vùng trong 2,8 s; mở lại từ bản lưu 3,5 ms | Một lượt, Claude Haiku 5.5, 19/10 |
+| Dàn chữ (10 trang, Haiku, prompt v3) | **93/93 vùng dịch được đều vẽ lại**; tràn 0, chồng chữ 0, lọt ngoài bóng 0; 4 vùng nghi còn nét (chữ trên nền gạch chéo dày) | Chấm tự động + xem ảnh; câu hét trong bóng, chú thích, tiêu đề chương giờ được dịch |
+| Bộ nhớ truyện v3 | Lưu trữ mọi bản tóm tắt (có mốc trang, model) + bản rút gọn gửi mỗi trang có trần ~2.100 token; truyện 1.000 chương / 300 nhân vật vẫn trong trần | Unit test; prompt mỗi trang ~3–6k token, rất xa ngưỡng 100k |
+| Unit test | 37/37 pass | `npm run check` |
 
 ### Bake-off model (một lượt, 10 trang GT, 18/10)
 
@@ -62,7 +64,13 @@ Code cũ không bị xóa: nằm trong `legacy/` và tag git `legacy-v0`.
 Cách đọc: nhãn GT có lỗi (ví dụ nhãn ghi ぎっそく, ảnh là さっそく), nên CER chỉ là chỉ báo đọc chữ, **chưa phải điểm chất lượng dịch**. Một lượt mỗi model, chưa phải p95.
 Mặc định tạm thời: **Haiku 5.5** (rẻ nhất, không lỗi tuân thủ); tầng nhanh/chất lượng: **Gemini 3.7 Flash**. Chốt sau khi nhóm chấm mù bản dịch.
 
-**Còn yếu (ca khó, báo riêng):** chữ trên nền speed line/hatching dày (vẫn có mảng sáng, cần thử LaMa), bóng gai có khung trùng khung chữ, chữ nhỏ cạnh SFX. Độ trễ bóng đầu ~5 s, chưa đạt mục tiêu < 5 s p95. Mục tiêu tham chiếu (chưa phải kết quả): bóng đầu < 5 s, trang ≤ 12 bóng < 8 s, mở lại từ cache < 200 ms.
+**Ứng viên mới (19/10, một lượt, 10 trang, cùng điều kiện):** Gemini 3.8 Flash đọc chữ tốt nhất (CER 24,0%) nhưng ~$0,009/trang; MiMo-V2.6-Flash đọc kém nhất (CER 40%) và chậm (29 s/trang); Qwen3.7-Flash và Qwen3.8-Omni-Flash (chỉ Alibaba phục vụ) từ chối 2–3/10 trang truyện bình thường vì bộ lọc nội dung. Muse Spark loại vì giá và vì bản rẻ cho Meta dùng dữ liệu để huấn luyện.
+
+**Model tóm tắt nền (chấm mù bằng GPT-5.6, cùng đầu vào):** DeepSeek V4.1 Flash trung thành nhất (2,0/3, ít lỗi nhất), ~$0,0002–0,0003 mỗi lần khi chọn nhà cung cấp rẻ nhất; MiMo/GLM viết đủ ý hơn nhưng thêm thắt sai (1,0/3); Qwen3.7-Flash kém nhất (0,5/3). Giữ DeepSeek.
+
+**Đọc chữ so với nhãn:** 29/81 nhãn có hai model khác hãng đọc giống nhau nhưng khác nhãn (nghi nhãn sai trước); 14/81 là ca khó thật. Bảng phân xử riêng: `.private/eval/ocr-audit.json` (không sửa dataset).
+
+**Còn yếu (ca khó, báo riêng):** chữ trên nền gạch chéo dày (MI-GAN để lại dải nhạt, cần thử LaMa); nhãn tên rất nhỏ ngoài vùng (model báo được nhưng ước vị trí lệch ~150 px nên chỉ hiện dạng ghi chú). Độ trễ bóng đầu trung vị ~5,5–6,7 s, có lần chờ 28 s do nhà cung cấp; chưa đạt mục tiêu < 5 s p95. Mục tiêu tham chiếu (chưa phải kết quả): bóng đầu < 5 s, trang ≤ 12 bóng < 8 s, mở lại từ cache < 200 ms.
 
 ## 5. Tính năng theo mốc
 

@@ -72,17 +72,30 @@ export interface MissedNote {
   ja: string;
   vi: string;
   near?: string;
+  role?: Role;
+  /** Per-mille page box [x0, y0, x1, y1] from the reader model; refined by a zoomed detection before use. */
+  box?: [number, number, number, number];
+}
+
+export interface SeriesNote {
+  genres: string[];
+  tone?: string;
+  setting?: string;
 }
 
 export interface PageNotes {
   names: NameNote[];
   address: AddressNote[];
   missed: MissedNote[];
+  /** Only on the first page of a story without a profile (cold start). */
+  series?: SeriesNote;
 }
 
 export interface Usage {
   promptTokens?: number;
   completionTokens?: number;
+  /** Prompt tokens served from the provider's prompt cache. */
+  cachedTokens?: number;
   costUsd?: number;
 }
 
@@ -123,5 +136,7 @@ export type TranslateEvent =
   | { type: "detected"; pageId: string; image: { w: number; h: number }; regions: TextRegion[]; detectMs: number }
   | { type: "region"; t: RegionTranslation; atMs: number }
   | { type: "notes"; notes: PageNotes }
+  /** Text the reader model found outside every detected region, located and added after the page. */
+  | { type: "regions-added"; regions: TextRegion[] }
   | { type: "done"; result: PageResult }
   | { type: "error"; message: string; code?: string };

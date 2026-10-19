@@ -9,6 +9,7 @@ import { DEFAULT_MODEL, MODELS } from "./models";
 import { translatePage } from "./pipeline";
 import { decodeImage } from "./image";
 import { charSizesFor, inpaintRegions, type Rejected } from "./inpaint";
+import { applyPlanned, bootstrapFromMetadata, planMemoryUpdate, searchSeries, UPDATE_EVERY_LINES } from "./context";
 import { loadResult, saveResult } from "./results";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -119,6 +120,7 @@ app.post("/api/translate", async (c) => {
         const merged = mergePage(memory, page.id, page.position, result.notes, Object.values(result.translations));
         await saveMemory(ns, merged.memory);
         await saveResult(ns, result);
+        if ((merged.memory.pending?.length ?? 0) >= UPDATE_EVERY_LINES) void backgroundUpdate(ns, page.seriesId, page.title, false);
       });
     } catch (e) {
       const err = e as { message?: string; code?: string };
@@ -141,6 +143,49 @@ app.post("/api/inpaint", async (c) => {
   const patches = await inpaintRegions(decoded, regions, result ? charSizesFor(result) : {}, rejected);
   c.header("Cache-Control", "no-store");
   return c.json({ patches, rejected, ms: Math.round(performance.now() - t0) });
+});
+
+// ---------------------------------------------------------------- context management
+
+const updating = new Set<string>();
+/** Summarize pending dialogue on a cheap model off the critical path, then merge under the series lock. */
+async function backgroundUpdate(ns: string, seriesId: string, title: string, force: boolean) {
+  const key = `${ns}:${seriesId}`;
+  if (updating.has(key)) return null;
+  updating.add(key);
+  try {
+    const plan = await planMemoryUpdate(await loadMemory(ns, seriesId, title), force);
+    if (!plan) return null;
+    return await serial(key, async () => {
+      const fresh = applyPlanned(await loadMemory(ns, seriesId, title), plan);
+      await saveMemory(ns, fresh);
+      return { costUsd: plan.costUsd, ms: plan.ms, summary: fresh.summary };
+    });
+  } catch (e) {
+    console.error("memory update failed:", (e as Error).message);
+    return null;
+  } finally {
+    updating.delete(key);
+  }
+}
+
+app.post("/api/memory/update", async (c) => {
+  const { ns = "demo", seriesId, title = "" } = await c.req.json<{ ns?: string; seriesId: string; title?: string }>();
+  return c.json((await backgroundUpdate(ns, seriesId, title, true)) ?? { skipped: true });
+});
+
+// Metadata lookup sends only the series title to AniList; the reader confirms the match.
+app.get("/api/series/search", async (c) => c.json(await searchSeries(c.req.query("title") ?? "")));
+
+app.post("/api/series/bootstrap", async (c) => {
+  const { ns = "demo", seriesId, title = "", anilistId } = await c.req.json<{ ns?: string; seriesId: string; title?: string; anilistId: number }>();
+  const key = `${ns}:${seriesId}`;
+  const out = await serial(key, async () => {
+    const res = await bootstrapFromMetadata(await loadMemory(ns, seriesId, title), anilistId);
+    await saveMemory(ns, res.memory);
+    return { profile: res.memory.profile, characters: res.memory.metadata?.characters.length ?? 0, costUsd: res.costUsd, ms: res.ms };
+  });
+  return c.json(out);
 });
 
 app.post("/api/ratings", async (c) => {

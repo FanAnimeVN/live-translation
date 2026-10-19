@@ -37,7 +37,7 @@ export const api = {
   resetMemory: (body: { ns: string; seriesId: string; title: string }) =>
     json<{ ok: boolean }>("/api/memory/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   inpaint: (body: { pageId: string; model: string; ns: string; ids: string[] }) =>
-    json<{ patches: Array<{ id: string; x: number; y: number; w: number; h: number; dataUrl: string; coverage: number; ms: number }>; ms: number }>(
+    json<{ patches: Array<{ id: string; x: number; y: number; w: number; h: number; dataUrl: string; coverage: number; ms: number; textBoxes: Array<{ x: number; y: number; w: number; h: number }>; textExtent?: { x: number; y: number; w: number; h: number } }>; ms: number }>(
       "/api/inpaint",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
     ),

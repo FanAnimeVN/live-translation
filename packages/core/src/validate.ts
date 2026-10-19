@@ -33,7 +33,8 @@ const NotesLine = z.object({
       }),
     )
     .optional(),
-  missed: z.array(z.object({ ja: str, vi: str.optional(), near: str.optional() })).optional(),
+  missed: z.array(z.object({ ja: str, vi: str.optional(), near: str.optional(), role: str.optional(), box: z.array(z.number()).optional() })).optional(),
+  series: z.object({ genre: z.array(str).optional(), genres: z.array(str).optional(), tone: str.optional(), setting: str.optional() }).optional(),
 });
 
 export function isNotesObject(value: unknown): boolean {
@@ -95,8 +96,37 @@ export function parseNotesObject(value: unknown): PageNotes | null {
       })),
     missed: (n.missed ?? [])
       .filter((x) => x.ja.trim())
-      .map((x) => ({ ja: x.ja.trim(), vi: (x.vi ?? "").trim(), near: x.near?.trim() || undefined })),
+      .map((x) => ({
+        ja: x.ja.trim(),
+        vi: (x.vi ?? "").trim(),
+        near: x.near?.trim() || undefined,
+        role: (ROLES as readonly string[]).includes(x.role ?? "") ? (x.role as Role) : undefined,
+        box: permilleBox(x.box),
+      })),
+    series: n.series
+      ? {
+          genres: (n.series.genres ?? n.series.genre ?? []).map((g) => g.trim()).filter(Boolean).slice(0, 5),
+          tone: n.series.tone?.trim() || undefined,
+          setting: n.series.setting?.trim() || undefined,
+        }
+      : undefined,
   };
+}
+
+/**
+ * Rules the model sometimes breaks that the geometry can settle: words in a speech
+ * bubble are spoken (a scream is still a line to letter), never a drawn sound effect.
+ */
+export function applyRegionRules(t: RegionTranslation, region: { kind: "bubble" | "free" } | undefined): RegionTranslation {
+  if (t.role === "sfx" && region?.kind === "bubble") return { ...t, role: "dialogue", fixes: [...t.fixes, "bubble-not-sfx"] };
+  return t;
+}
+
+/** A per-mille [x0, y0, x1, y1] box, or undefined when malformed or empty. */
+function permilleBox(b: number[] | undefined): [number, number, number, number] | undefined {
+  if (!b || b.length !== 4 || !b.every(Number.isFinite)) return undefined;
+  const [x0, y0, x1, y1] = b.map((v) => Math.max(0, Math.min(1000, v)));
+  return x1 > x0 && y1 > y0 ? [x0, y0, x1, y1] : undefined;
 }
 
 const clean = (s: string | undefined) => {

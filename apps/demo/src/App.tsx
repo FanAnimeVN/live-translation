@@ -115,7 +115,8 @@ export function App() {
               translations: { ...s.translations, [e.t.id]: e.t },
               live: { ...s.live, firstMs: s.live?.firstMs ?? performance.now() - t0 },
             }));
-          else if (e.type === "done") patch(p.id, (s) => ({ ...s, result: e.result, translations: e.result.translations, status: "done" }));
+          else if (e.type === "regions-added") patch(p.id, (s) => ({ ...s, regions: [...s.regions, ...e.regions] }));
+          else if (e.type === "done") patch(p.id, (s) => ({ ...s, result: e.result, regions: e.result.regions, translations: e.result.translations, status: "done" }));
           else if (e.type === "error") patch(p.id, (s) => ({ ...s, status: "error", error: friendlyError(e.message, e.code) }));
         });
       } catch (err) {
@@ -164,7 +165,7 @@ export function App() {
               new Promise<void>((resolve) => {
                 const im = new Image();
                 im.onload = () => {
-                  loaded[p.id] = { x: p.x, y: p.y, image: im };
+                  loaded[p.id] = { x: p.x, y: p.y, image: im, textBoxes: p.textBoxes, textExtent: p.textExtent };
                   resolve();
                 };
                 im.onerror = () => resolve();
@@ -479,7 +480,9 @@ function Viewer(props: {
 
   const w = img?.naturalWidth ?? 1;
   const h = img?.naturalHeight ?? 1;
-  const markers = renders.filter((r) => r.status === "kept-original" || r.status === "sfx" || r.status === "skipped");
+  // SFX and title lettering stay part of the art (tap to read); text on art shows a
+  // small pending dot only until its reconstructed background arrives.
+  const markers = renders.filter((r) => r.status === "needs-inpaint" || r.status === "sfx" || r.status === "skipped");
   return (
     <div className="viewer">
       <div className="stage">
@@ -496,7 +499,7 @@ function Viewer(props: {
                 title={props.translations[m.id]?.vi}
                 onClick={() => props.onSelect(m.id)}
               >
-                {m.status === "sfx" ? "♪" : "i"}
+                {m.status === "sfx" ? "♪" : m.status === "needs-inpaint" ? "…" : "i"}
               </button>
             );
           })}

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyRegionRules,
   buildRegions,
   cer,
+  fromPermille,
+  parseNotesObject,
   emptyMemory,
   fixHonorificStacking,
   JsonObjectStream,
@@ -52,6 +55,26 @@ describe("honorific no-stack rule", () => {
     expect(t?.fixes).toEqual(["honorific-no-stack"]);
   });
 
+  it("letters a scream in a speech bubble instead of keeping it as a sound effect", () => {
+    const t = parseRegionObject({ id: "r2", ja: "ギャ～", vi: "Áaa~", role: "sfx" }, new Set(["r2"]), 0)!;
+    expect(applyRegionRules(t, { kind: "bubble" })).toMatchObject({ role: "dialogue", fixes: ["bubble-not-sfx"] });
+    expect(applyRegionRules(t, { kind: "free" }).role).toBe("sfx");
+  });
+
+  it("keeps the role and a valid box for text found outside every region", () => {
+    const n = parseNotesObject({
+      type: "notes",
+      missed: [
+        { ja: "ナナ", vi: "Nana", role: "sign", box: [340, 790, 380, 810] },
+        { ja: "トラ", vi: "Tora", role: "label?", box: [500, 500, 400, 600] },
+      ],
+    })!;
+    expect(n.missed[0]).toMatchObject({ role: "sign", box: [340, 790, 380, 810] });
+    expect(n.missed[1].role).toBeUndefined();
+    expect(n.missed[1].box).toBeUndefined();
+    expect(fromPermille([500, 250, 750, 500], 800, 1200)).toEqual({ x: 400, y: 300, w: 200, h: 300 });
+  });
+
   it("rejects unknown ids and keeps unknown speakers unknown", () => {
     expect(parseRegionObject({ id: "r9", vi: "x" }, new Set(["r1"]), 0)).toBeNull();
     const t = parseRegionObject({ id: "r1", ja: "誰？", vi: "Ai?", speaker: "", to: "N/A" }, new Set(["r1"]), 0);
@@ -86,6 +109,42 @@ describe("buildRegions", () => {
     expect(regions.map((r) => r.id)).toEqual(["r1", "r2"]);
     // the free text at x=400 is further right, so it is read first
     expect(regions[0].box.x).toBe(400);
+  });
+
+  const opts = { minScore: 0.3, minScoreInBubble: 0.1, lonelyBubble: 0.5 };
+
+  it("keeps faint text that a confident bubble vouches for, not faint text on its own", () => {
+    const dets: Detection[] = [
+      { cls: "bubble", box: { x: 86, y: 852, w: 72, h: 89 }, score: 0.56 },
+      { cls: "text_bubble", box: { x: 94, y: 862, w: 43, h: 62 }, score: 0.15 },
+      { cls: "text_free", box: { x: 400, y: 50, w: 30, h: 90 }, score: 0.15 },
+    ];
+    const regions = buildRegions(dets, opts);
+    expect(regions).toHaveLength(1);
+    expect(regions[0]).toMatchObject({ kind: "bubble", box: { x: 94, y: 862 } });
+  });
+
+  it("drops a text box that repeats the whole balloon when a tighter one exists", () => {
+    const bubble = { x: 340, y: 24, w: 114, h: 208 };
+    const regions = buildRegions(
+      [
+        { cls: "bubble", box: bubble, score: 0.9 },
+        { cls: "text_bubble", box: { ...bubble }, score: 0.4 },
+        { cls: "text_bubble", box: { x: 350, y: 49, w: 70, h: 166 }, score: 0.9 },
+      ],
+      opts,
+    );
+    expect(regions).toHaveLength(1);
+    expect(regions[0].members).toEqual([{ x: 350, y: 49, w: 70, h: 166 }]);
+    expect(regions[0].box).toEqual({ x: 350, y: 49, w: 70, h: 166 });
+  });
+
+  it("turns a confident bubble with no text box into a region for the reader to check", () => {
+    const regions = buildRegions([{ cls: "bubble", box: { x: 0, y: 0, w: 100, h: 100 }, score: 0.8 }], opts);
+    expect(regions).toHaveLength(1);
+    expect(regions[0].kind).toBe("bubble");
+    expect(regions[0].box.x).toBeCloseTo(18);
+    expect(buildRegions([{ cls: "bubble", box: { x: 0, y: 0, w: 100, h: 100 }, score: 0.4 }], opts)).toHaveLength(0);
   });
 });
 

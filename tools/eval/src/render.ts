@@ -1,14 +1,20 @@
 /**
- * Render saved page results to PNG for visual QA (private, gitignored .private/renders).
- * Usage: npx tsx tools/eval/src/render.ts <model> [pageId...] [--debug]
+ * Render saved page results to PNG and score the lettering automatically
+ * (private, gitignored .private/renders and .private/qa).
+ *
+ *   npx tsx tools/eval/src/render.ts <model> [pageId...] [--eval <runId>] [--debug] [--no-inpaint]
+ *
+ * Per page it reports: regions lettered, regions still waiting for inpainting,
+ * leftover Japanese under lettering (residue), overflow, lettering overlapping other
+ * lettering or unerased text, and lettering leaving its balloon.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { PageResult } from "@lt/core";
-import type { Rejected } from "../../../apps/server/src/inpaint";
 import { join } from "node:path";
 import { createCanvas, GlobalFonts, loadImage } from "@napi-rs/canvas";
-import { LETTERING_FONT, renderTranslation, type Ctx2D, type PatchImage } from "@lt/render";
+import { expand, intersect, type Box, type PageResult } from "@lt/core";
+import { LETTERING_FONT, MAX_RESIDUE, renderTranslation, type Ctx2D, type PatchImage, type RegionRender } from "@lt/render";
 import { charSizesFor, decodeImage, getPage, inpaintRegions, listPages, loadResult, PRIVATE_DIR, readPageImage, ROOT } from "@lt/server";
+import type { Rejected } from "../../../apps/server/src/inpaint";
 
 GlobalFonts.registerFromPath(join(ROOT, "apps", "demo", "public", "fonts", "PatrickHand-Regular.ttf"), LETTERING_FONT);
 
@@ -29,8 +35,24 @@ async function load(pageId: string): Promise<PageResult | null> {
   }
 }
 const pages = ids.length ? await Promise.all(ids.map(getPage)) : await listPages();
-const out = join(PRIVATE_DIR, "renders", evalRun ?? ns, model.replace(/[^a-zA-Z0-9._-]/g, "_"));
+const out = join(PRIVATE_DIR, "renders", evalRun ?? ns, safe(model));
 await mkdir(out, { recursive: true });
+
+interface PageQa {
+  pageId: string;
+  regions: number;
+  lettered: number;
+  waitingInpaint: number;
+  sfxOrDecorative: number;
+  residue: string[];
+  overflow: string[];
+  overlaps: string[];
+  overUnerased: string[];
+  outsideBalloon: string[];
+  inpaintMs: number;
+  rejected: string[];
+}
+const report: PageQa[] = [];
 
 for (const page of pages) {
   const result = await load(page.id);
@@ -39,29 +61,29 @@ for (const page of pages) {
   const canvas = createCanvas(d.w * 2, d.h);
   const ctx = canvas.getContext("2d");
   ctx.drawImage(d.canvas, 0, 0);
-  ctx.drawImage(d.canvas, d.w, 0);
   // Render the translation on the right half only.
   const right = createCanvas(d.w, d.h);
   const rctx = right.getContext("2d");
   rctx.drawImage(d.canvas, 0, 0);
   let renders = renderTranslation(rctx as unknown as Ctx2D, { w: d.w, h: d.h }, result.regions, result.translations);
-  const need = renders.filter((r) => r.needsInpaint).map((r) => r.id);
+  const need = renders.filter((r) => r.status === "needs-inpaint").map((r) => r.id);
   let inpaintMs = 0;
+  const rejected: Rejected[] = [];
   if (inpaint && need.length) {
     const t0 = performance.now();
-    const rejected: Rejected[] = [];
     const patches = await inpaintRegions(d, result.regions.filter((r) => need.includes(r.id)), charSizesFor(result), rejected);
-    if (rejected.length) console.log(page.id, "inpaint rejected:", rejected.map((r) => `${r.id}:${r.reason}(${r.coverage.toFixed(2)})`).join(" "));
     inpaintMs = Math.round(performance.now() - t0);
     const images: Record<string, PatchImage> = {};
-    for (const p of patches) images[p.id] = { x: p.x, y: p.y, image: await loadImage(Buffer.from(p.dataUrl.split(",")[1], "base64")) };
+    for (const p of patches) images[p.id] = { x: p.x, y: p.y, image: await loadImage(Buffer.from(p.dataUrl.split(",")[1], "base64")), textBoxes: p.textBoxes, textExtent: p.textExtent };
     rctx.drawImage(d.canvas, 0, 0);
     renders = renderTranslation(rctx as unknown as Ctx2D, { w: d.w, h: d.h }, result.regions, result.translations, { patches: images });
   }
+  const qa = score(page.id, result, renders, inpaintMs, rejected);
+  report.push(qa);
   if (debug) {
     for (const r of result.regions) {
       const st = renders.find((x) => x.id === r.id)?.status ?? "none";
-      rctx.strokeStyle = st === "lettered" ? "#16a34a" : st === "kept-original" ? "#dc2626" : "#7c3aed";
+      rctx.strokeStyle = st === "lettered" ? "#16a34a" : st === "needs-inpaint" ? "#dc2626" : "#7c3aed";
       rctx.lineWidth = 2;
       rctx.strokeRect(r.box.x, r.box.y, r.box.w, r.box.h);
       if (r.bubble) {
@@ -70,20 +92,73 @@ for (const page of pages) {
       }
       rctx.fillStyle = "#000";
       rctx.font = "bold 14px sans-serif";
-      const e = renders.find((x) => x.id === r.id)?.erase;
-      rctx.fillText(`${r.id}${e ? ` f=${e.flatness.toFixed(2)}` : ""}`, r.box.x, r.box.y - 3);
+      rctx.fillText(r.id, r.box.x, r.box.y - 3);
     }
   }
   ctx.drawImage(right, d.w, 0);
   await writeFile(join(out, `${page.id}.png`), await canvas.encode("png"));
-  const summary = renders
-    .map((r) => {
-      const reg = result.regions.find((x) => x.id === r.id)!;
-      const t = result.translations[r.id];
-      const cs = Math.sqrt((reg.box.w * reg.box.h) / Math.max(1, [...(t?.ja ?? "").replace(/\s/g, "")].length || 4));
-      return `${r.id}${reg.bubble ? "B" : "F"}:${r.status}${r.erase ? `(f=${r.erase.flatness.toFixed(2)} i=${r.erase.inkShare.toFixed(2)} m=${r.erase.midShare.toFixed(2)} ${r.erase.mode})` : ""} h=${Math.round(reg.box.h)} cs~${Math.round(cs)}${r.layout?.overflow ? " !overflow" : ""}`;
-    })
-    .join("\n   ");
-  console.log(page.id, need.length ? `(inpainted ${need.length} in ${inpaintMs} ms)` : "", summary);
+  const flags = [
+    qa.residue.length && `residue ${qa.residue.join(",")}`,
+    qa.overflow.length && `overflow ${qa.overflow.join(",")}`,
+    qa.overlaps.length && `overlap ${qa.overlaps.join(",")}`,
+    qa.overUnerased.length && `over-unerased ${qa.overUnerased.join(",")}`,
+    qa.outsideBalloon.length && `outside-balloon ${qa.outsideBalloon.join(",")}`,
+    qa.waitingInpaint && `not-redrawn ${renders.filter((r) => r.status === "needs-inpaint").map((r) => r.id).join(",")}`,
+  ].filter(Boolean);
+  console.log(`${page.id.padEnd(9)} lettered ${qa.lettered}/${qa.regions - qa.sfxOrDecorative} translatable, sfx/decor ${qa.sfxOrDecorative}, inpaint ${need.length} in ${inpaintMs} ms ${flags.length ? "| " + flags.join(" | ") : "| clean"}`);
 }
+
+const total = (k: keyof PageQa) => report.reduce((s, r) => s + (Array.isArray(r[k]) ? (r[k] as string[]).length : Number(r[k]) || 0), 0);
+console.log(
+  `\nTOTAL lettered ${total("lettered")}, not redrawn ${total("waitingInpaint")}, residue ${total("residue")}, overflow ${total("overflow")}, ` +
+    `overlap ${total("overlaps")}, over-unerased ${total("overUnerased")}, outside-balloon ${total("outsideBalloon")}, inpaint ${total("inpaintMs")} ms`,
+);
+await mkdir(join(PRIVATE_DIR, "qa"), { recursive: true });
+await writeFile(join(PRIVATE_DIR, "qa", `${evalRun ?? ns}-${safe(model)}.json`), JSON.stringify(report, null, 1), "utf8");
 console.log("written to", out);
+
+function score(pageId: string, result: PageResult, renders: RegionRender[], inpaintMs: number, rejected: Rejected[]): PageQa {
+  const byId = new Map(result.regions.map((r) => [r.id, r]));
+  const lettered = renders.filter((r) => r.status === "lettered" && r.textBox);
+  const unerased = renders.filter((r) => r.status === "sfx" || r.status === "skipped" || r.status === "needs-inpaint");
+  const overlapArea = (a: Box, b: Box) => {
+    const i = intersect(a, b);
+    return i ? i.w * i.h : 0;
+  };
+  const overlaps: string[] = [];
+  for (let i = 0; i < lettered.length; i++) {
+    for (let j = i + 1; j < lettered.length; j++) {
+      if (overlapArea(lettered[i].textBox!, lettered[j].textBox!) > 16) overlaps.push(`${lettered[i].id}+${lettered[j].id}`);
+    }
+  }
+  const overUnerased: string[] = [];
+  for (const l of lettered) {
+    for (const u of unerased) {
+      const reg = byId.get(u.id)!;
+      if (overlapArea(l.textBox!, reg.box) > 16) overUnerased.push(`${l.id}>${u.id}`);
+    }
+  }
+  const outsideBalloon = lettered
+    .filter((l) => {
+      const reg = byId.get(l.id)!;
+      if (!reg.bubble) return false;
+      const b = expand(reg.bubble, 3);
+      const t = l.textBox!;
+      return t.x < b.x || t.y < b.y || t.x + t.w > b.x + b.w || t.y + t.h > b.y + b.h;
+    })
+    .map((l) => l.id);
+  return {
+    pageId,
+    regions: result.regions.length,
+    lettered: lettered.length,
+    waitingInpaint: renders.filter((r) => r.status === "needs-inpaint").length,
+    sfxOrDecorative: renders.filter((r) => r.status === "sfx" || r.status === "skipped" || r.status === "empty").length,
+    residue: lettered.filter((r) => (r.residue ?? 0) > MAX_RESIDUE).map((r) => r.id),
+    overflow: lettered.filter((r) => r.overflow).map((r) => r.id),
+    overlaps,
+    overUnerased,
+    outsideBalloon,
+    inpaintMs,
+    rejected: rejected.map((r) => `${r.id}:${r.reason}`),
+  };
+}

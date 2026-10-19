@@ -11,9 +11,13 @@ export interface LedgerEntry {
   costUsd: number;
   promptTokens?: number;
   completionTokens?: number;
+  cachedTokens?: number;
   ms?: number;
   ttfbMs?: number;
   provider?: string;
+  /** Request body size; images dominate it. */
+  reqKb?: number;
+  retries?: number;
   error?: string;
 }
 

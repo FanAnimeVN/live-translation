@@ -1,10 +1,12 @@
 export { env, ROOT, PRIVATE_DIR } from "./env";
 export { listPages, getPage, readPageImage, type DatasetPage, type GtBubble } from "./dataset";
-export { decodeImage } from "./image";
-export { detect, loadDetector } from "./detector";
+export { decodeImage, markedPageDataUrl, regionCrops } from "./image";
+export { streamChat } from "./openrouter";
+export { detect, detectInCrop, loadDetector } from "./detector";
 export { translatePage } from "./pipeline";
 export { MODELS, DEFAULT_MODEL, modelInfo } from "./models";
 export { loadMemory, saveMemory } from "./memoryStore";
 export { saveResult, loadResult } from "./results";
 export { spentUsd } from "./ledger";
-export { charSizesFor, inpaintRegions, loadInpainter } from "./inpaint";
+export { charSizesFor, inpaintRegions, loadInpainter, refineTextBoxes } from "./inpaint";
+export { applyPlanned, bootstrapFromMetadata, planMemoryUpdate, searchSeries, BACKGROUND_MODEL, UPDATE_EVERY_LINES } from "./context";

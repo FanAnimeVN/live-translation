@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as ort from "onnxruntime-node";
 import { createCanvas } from "@napi-rs/canvas";
-import { area, artTextMask, patchBlends, type PageResult, type TextRegion } from "@lt/core";
+import { area, artTextMask, clampBox, containment, expand, glyphResidue, patchBlends, roundBox, type Box, type InpaintJob, type PageResult, type RGBAImage, type TextRegion } from "@lt/core";
+import { detectInCrop } from "./detector";
 import { ROOT } from "./env";
 import type { DecodedPage } from "./image";
 
@@ -33,16 +34,21 @@ export interface Patch {
   dataUrl: string;
   coverage: number;
   ms: number;
+  /** The text boxes the hole was built from (tighter than the region box for small free text). */
+  textBoxes: Box[];
+  /** Bounds of the glyph strokes that were removed: where the original text really sat. */
+  textExtent?: Box;
 }
 
+/** Diagnostics for a reconstruction that needed the fallback (the text is still redrawn). */
 export interface Rejected {
   id: string;
-  reason: "mask-unreliable" | "visible-patch";
+  reason: "rect-fallback" | "glyphs-survived" | "visible-patch";
   coverage: number;
 }
 
-/** Above this share of the text box the mask is no longer "the glyphs" but art too. */
-const MAX_COVERAGE = 0.85;
+/** Glyph-shaped ink left in the text core after reconstruction that triggers a whole-box retry. */
+const MAX_RESIDUE_AFTER = 0.02;
 
 /** Reconstruct the artwork under each region's text with MI-GAN. */
 export async function inpaintRegions(
@@ -56,33 +62,22 @@ export async function inpaintRegions(
   const out: Patch[] = [];
   for (const r of regions) {
     const t0 = performance.now();
-    const job = artTextMask(full, r.members, { charSize: charSizes[r.id] });
-    if (job.coverage > MAX_COVERAGE || job.coverage === 0) {
-      rejected.push({ id: r.id, reason: "mask-unreliable", coverage: job.coverage });
-      continue;
+    const members = r.bubble ? r.members : await refineTextBoxes(page, r);
+    // The size guess is box area / character count: a tighter box means smaller glyphs.
+    const cs = charSizes[r.id] && Math.sqrt((charSizes[r.id] ** 2 * members.reduce((a, m) => a + area(m), 0)) / area(r.box));
+    let job = artTextMask(full, members, { charSize: cs });
+    let result = await runMigan(s, full, job);
+    if (job.rect) rejected.push({ id: r.id, reason: "rect-fallback", coverage: job.coverage });
+    else if (residueAfter(full, result, job, members, cs) > MAX_RESIDUE_AFTER) {
+      // Strokes escaped the glyph mask: reconstruct the whole text box instead (protected art stays).
+      rejected.push({ id: r.id, reason: "glyphs-survived", coverage: job.coverage });
+      job = artTextMask(full, members, { charSize: cs, rect: true });
+      result = await runMigan(s, full, job);
+    } else if (!patchBlends(full, result, job).ok) {
+      rejected.push({ id: r.id, reason: "visible-patch", coverage: job.coverage });
     }
     const { x, y, w, h } = job.crop;
     const n = w * h;
-    const image = new Uint8Array(3 * n);
-    const mask = new Uint8Array(n);
-    for (let p = 0; p < n; p++) {
-      const px = p % w;
-      const py = (p - px) / w;
-      const i = ((y + py) * page.w + (x + px)) * 4;
-      image[p] = full.data[i];
-      image[n + p] = full.data[i + 1];
-      image[2 * n + p] = full.data[i + 2];
-      mask[p] = job.hole[p] ? 0 : 255;
-    }
-    const res = await s.run({
-      image: new ort.Tensor("uint8", image, [1, 3, h, w]),
-      mask: new ort.Tensor("uint8", mask, [1, 1, h, w]),
-    });
-    const result = res.result.data as Uint8Array;
-    if (!patchBlends(full, result, job).ok) {
-      rejected.push({ id: r.id, reason: "visible-patch", coverage: job.coverage });
-      continue;
-    }
     const canvas = createCanvas(w, h);
     const ctx = canvas.getContext("2d");
     const patch = ctx.createImageData(w, h);
@@ -95,13 +90,70 @@ export async function inpaintRegions(
       patch.data[p * 4] = hole ? result[p] : full.data[i];
       patch.data[p * 4 + 1] = hole ? result[n + p] : full.data[i + 1];
       patch.data[p * 4 + 2] = hole ? result[2 * n + p] : full.data[i + 2];
-      patch.data[p * 4 + 3] = 255;
+      // Transparent outside the hole: overlapping patches must never paint back source pixels.
+      patch.data[p * 4 + 3] = hole ? 255 : 0;
     }
     ctx.putImageData(patch, 0, 0);
     const png = await canvas.encode("png");
-    out.push({ id: r.id, x, y, w, h, dataUrl: `data:image/png;base64,${png.toString("base64")}`, coverage: job.coverage, ms: Math.round(performance.now() - t0) });
+    out.push({ id: r.id, x, y, w, h, dataUrl: `data:image/png;base64,${png.toString("base64")}`, coverage: job.coverage, ms: Math.round(performance.now() - t0), textBoxes: members, textExtent: job.extent });
   }
   return out;
+}
+
+async function runMigan(s: ort.InferenceSession, full: RGBAImage, job: InpaintJob): Promise<Uint8Array> {
+  const { x, y, w, h } = job.crop;
+  const n = w * h;
+  const image = new Uint8Array(3 * n);
+  const mask = new Uint8Array(n);
+  for (let p = 0; p < n; p++) {
+    const px = p % w;
+    const py = (p - px) / w;
+    const i = ((y + py) * full.width + (x + px)) * 4;
+    image[p] = full.data[i];
+    image[n + p] = full.data[i + 1];
+    image[2 * n + p] = full.data[i + 2];
+    mask[p] = job.hole[p] ? 0 : 255;
+  }
+  const res = await s.run({
+    image: new ort.Tensor("uint8", image, [1, 3, h, w]),
+    mask: new ort.Tensor("uint8", mask, [1, 1, h, w]),
+  });
+  return res.result.data as Uint8Array;
+}
+
+/**
+ * Tight text boxes for a free-text region. The page detector sees small text at about
+ * half size and returns loose boxes that swallow nearby art (a whisper beside a face);
+ * detecting again on a zoomed crop boxes the text itself. Falls back to the region's
+ * own boxes when nothing better is found.
+ */
+export async function refineTextBoxes(page: DecodedPage, r: TextRegion): Promise<Box[]> {
+  const u = r.box;
+  const crop = roundBox(clampBox(expand(u, Math.max(10, 0.4 * Math.max(u.w, u.h))), page.w, page.h));
+  if (640 / Math.max(crop.w, crop.h) < 1.5) return r.members; // big text: page-level boxes are already tight
+  const near = expand(u, 6);
+  const boxes = (await detectInCrop(page, crop, 0.25)).map((d) => d.box).filter((b) => containment(b, near) >= 0.6);
+  if (!boxes.length) return r.members;
+  return boxes.reduce((a, b) => a + area(b), 0) < 0.9 * area(u) ? boxes : r.members;
+}
+
+/** Glyph residue of the text boxes after compositing the reconstruction into a copy of the crop. */
+function residueAfter(full: RGBAImage, result: Uint8Array, job: InpaintJob, members: Box[], charSize?: number): number {
+  const { x, y, w, h } = job.crop;
+  const n = w * h;
+  const data = new Uint8ClampedArray(n * 4);
+  for (let p = 0; p < n; p++) {
+    const px = p % w;
+    const py = (p - px) / w;
+    const i = ((y + py) * full.width + (x + px)) * 4;
+    const hole = job.hole[p] === 1;
+    data[p * 4] = hole ? result[p] : full.data[i];
+    data[p * 4 + 1] = hole ? result[n + p] : full.data[i + 1];
+    data[p * 4 + 2] = hole ? result[2 * n + p] : full.data[i + 2];
+    data[p * 4 + 3] = 255;
+  }
+  const local = members.map((m) => ({ x: m.x - x, y: m.y - y, w: m.w, h: m.h }));
+  return glyphResidue({ width: w, height: h, data }, local, charSize);
 }
 
 /** Estimated source glyph size per region, from the transcription length. */

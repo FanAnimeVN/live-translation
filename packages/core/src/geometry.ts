@@ -65,6 +65,10 @@ export function roundBox(b: Box): Box {
 }
 
 /** Box in 0..1000 page coordinates [x1, y1, x2, y2] for prompts. */
+export function fromPermille(b: [number, number, number, number], w: number, h: number): Box {
+  return { x: (b[0] / 1000) * w, y: (b[1] / 1000) * h, w: ((b[2] - b[0]) / 1000) * w, h: ((b[3] - b[1]) / 1000) * h };
+}
+
 export function toPermille(b: Box, w: number, h: number): [number, number, number, number] {
   const f = (v: number, d: number) => Math.max(0, Math.min(1000, Math.round((v / d) * 1000)));
   return [f(b.x, w), f(b.y, h), f(b.x + b.w, w), f(b.y + b.h, h)];

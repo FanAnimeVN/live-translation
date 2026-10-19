@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import * as ort from "onnxruntime-node";
 import { createCanvas } from "@napi-rs/canvas";
-import { buildRegions, decodeDetections, DETECTOR_INPUT, type Detection, type TextRegion } from "@lt/core";
+import { buildRegions, decodeDetections, DETECTOR_INPUT, type Box, type Detection, type TextRegion } from "@lt/core";
 import { env } from "./env";
 import type { DecodedPage } from "./image";
 
@@ -27,6 +27,30 @@ export interface DetectResult {
   ms: number;
 }
 
+/**
+ * Text boxes from the detector run on a zoomed crop. The page pass sees small text at
+ * about half size: name tags and whispers are missed or boxed loosely. Zooming the area
+ * (up to 4x) gives tight boxes around the text itself, in page coordinates.
+ */
+export async function detectInCrop(page: DecodedPage, crop: Box, minScore = 0.25): Promise<Array<{ box: Box; score: number }>> {
+  const zoom = Math.min(4, DETECTOR_INPUT / Math.max(crop.w, crop.h));
+  const zw = Math.max(1, Math.round(crop.w * zoom));
+  const zh = Math.max(1, Math.round(crop.h * zoom));
+  const canvas = createCanvas(zw, zh);
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(page.canvas, crop.x, crop.y, crop.w, crop.h, 0, 0, zw, zh);
+  const det = await detect({ w: zw, h: zh, canvas, ctx }, minScore);
+  return det.detections
+    .filter((d) => d.cls !== "bubble")
+    .map((d) => ({ box: { x: crop.x + d.box.x / zoom, y: crop.y + d.box.y / zoom, w: d.box.w / zoom, h: d.box.h / zoom }, score: d.score }));
+}
+
+/** Faint text inside a confident bubble still counts (a lone "!" scores ~0.15). */
+const IN_BUBBLE_SCORE = 0.1;
+/** A bubble this sure becomes a region even when no text was found inside it. */
+const LONELY_BUBBLE = 0.5;
+
 export async function detect(page: DecodedPage, minScore = 0.3): Promise<DetectResult> {
   const t0 = performance.now();
   const s = await loadDetector();
@@ -49,7 +73,7 @@ export async function detect(page: DecodedPage, minScore = 0.3): Promise<DetectR
   }
   const out = await s.run(feeds);
   const [labels, boxes, scores] = s.outputNames.map((name) => out[name]);
-  const detections = decodeDetections(
+  const all = decodeDetections(
     {
       labels: labels.data as BigInt64Array,
       boxes: boxes.data as Float32Array,
@@ -58,7 +82,9 @@ export async function detect(page: DecodedPage, minScore = 0.3): Promise<DetectR
     },
     page.w,
     page.h,
-    minScore,
+    Math.min(minScore, IN_BUBBLE_SCORE),
   );
-  return { detections, regions: buildRegions(detections), ms: performance.now() - t0 };
+  const detections = all.filter((d) => d.score >= minScore);
+  const regions = buildRegions(all, { minScore, minScoreInBubble: IN_BUBBLE_SCORE, lonelyBubble: LONELY_BUBBLE });
+  return { detections, regions, ms: performance.now() - t0 };
 }

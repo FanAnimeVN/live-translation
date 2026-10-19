@@ -1,8 +1,19 @@
 import {
+  applyRegionRules,
   buildUserParts,
+  center,
+  clampBox,
+  containment,
+  containsPoint,
+  expand,
+  fromPermille,
+  iou,
+  roundBox,
+  type MissedNote,
   isNotesObject,
   JsonObjectStream,
-  memoryContext,
+  stableContext,
+  volatileContext,
   parseNotesObject,
   parseRegionObject,
   PROMPT_VERSION,
@@ -15,7 +26,7 @@ import {
   type TextRegion,
   type TranslateEvent,
 } from "@lt/core";
-import { detect } from "./detector";
+import { detect, detectInCrop } from "./detector";
 import { decodeImage, markedPageDataUrl, regionCrops, type DecodedPage } from "./image";
 import { mockReply } from "./mock";
 import { streamChat } from "./openrouter";
@@ -51,7 +62,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
 
   const translations: Record<string, RegionTranslation> = {};
   const notes: PageNotes = { names: [], address: [], missed: [] };
-  const usage = { promptTokens: 0, completionTokens: 0, costUsd: 0 };
+  const usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0 };
   let firstRegionMs: number | undefined;
   let ttfbMs: number | undefined;
   let seq = 0;
@@ -69,8 +80,9 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
         }
         return;
       }
-      const t = parseRegionObject(value, ids, seq);
-      if (!t || translations[t.id]) return;
+      const parsed = parseRegionObject(value, ids, seq);
+      if (!parsed || translations[parsed.id]) return;
+      const t = applyRegionRules(parsed, regions.find((r) => r.id === parsed.id));
       seq++;
       translations[t.id] = t;
       firstRegionMs ??= performance.now() - t0;
@@ -96,6 +108,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     ttfbMs ??= stats.ttfbMs;
     usage.promptTokens += stats.promptTokens ?? 0;
     usage.completionTokens += stats.completionTokens ?? 0;
+    usage.cachedTokens += stats.cachedTokens ?? 0;
     usage.costUsd += stats.costUsd;
   };
 
@@ -109,12 +122,25 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     missing = missing.filter((id) => !translations[id]);
   }
 
+  // Text the model saw outside every region (name tags, captions): place what a zoomed
+  // detection confirms; the rest stays a note the reader can open, never erased blindly.
+  const placed = await placeMissed(decoded, regions, notes.missed);
+  if (placed.length) {
+    emit({ type: "regions-added", regions: placed.map((p) => p.region) });
+    for (const p of placed) {
+      const t: RegionTranslation = { id: p.region.id, ja: p.note.ja, vi: p.note.vi, role: p.note.role ?? "sign", speaker: "unknown", to: "unknown", style: [], seq: seq++, fixes: ["placed-missed"] };
+      translations[t.id] = t;
+      emit({ type: "region", t, atMs: Math.round(performance.now() - t0) });
+    }
+    notes.missed = notes.missed.filter((m) => !placed.some((p) => p.note === m));
+  }
+
   const result: PageResult = {
     pageId: page.id,
     seriesId: page.seriesId,
     position: page.position,
     image: { w: decoded.w, h: decoded.h },
-    regions,
+    regions: [...regions, ...placed.map((p) => p.region)],
     translations,
     notes,
     model: opts.model,
@@ -133,12 +159,34 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
   emit({ type: "done", result });
   return result;
 
+  async function placeMissed(d: DecodedPage, rs: TextRegion[], missed: MissedNote[]): Promise<Array<{ region: TextRegion; note: MissedNote }>> {
+    const out: Array<{ region: TextRegion; note: MissedNote }> = [];
+    const taken = rs.map((r) => r.bubble ?? r.box);
+    for (const note of missed) {
+      if (!note.box || !note.vi || note.role === "sfx" || note.role === "decorative" || note.role === "none") continue;
+      const rough = fromPermille(note.box, d.w, d.h);
+      const size = Math.max(rough.w, rough.h);
+      const search = roundBox(clampBox(expand(rough, Math.max(16, size * 0.6)), d.w, d.h));
+      const near = expand(rough, size * 0.5);
+      const best = (await detectInCrop(d, search, 0.2))
+        .filter((c) => iou(c.box, rough) > 0.05 || containsPoint(near, center(c.box)))
+        .filter((c) => !taken.some((t) => containment(c.box, t) > 0.5 || containment(t, c.box) > 0.5))
+        .sort((a, b) => iou(b.box, rough) - iou(a.box, rough) || b.score - a.score)[0];
+      if (!best) continue;
+      taken.push(best.box);
+      const k = out.length + 1;
+      out.push({ region: { id: `m${k}`, kind: "free", box: best.box, members: [best.box], score: Math.round(best.score * 1000) / 1000, order: rs.length + k - 1 }, note });
+    }
+    return out;
+  }
+
   async function requestParts(p: PageInput, d: DecodedPage, rs: TextRegion[], o: TranslateOptions, onlyIds?: string[]) {
     const cropIds = o.crops === "all" ? rs.map((r) => r.id) : o.crops === "none" ? [] : undefined;
     return buildUserParts({
       title: p.title,
       position: p.position,
-      memory: memoryContext(o.memory, p.position),
+      stableMemory: stableContext(o.memory, p.position),
+      volatileMemory: volatileContext(o.memory, p.position),
       regions: rs,
       image: { w: d.w, h: d.h },
       markedPageDataUrl: await markedPageDataUrl(d, rs),
