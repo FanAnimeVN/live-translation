@@ -10,3 +10,4 @@ export * from "./layout";
 export * from "./erase";
 export * from "./artmask";
 export * from "./metrics";
+export * from "./gutters";

@@ -83,12 +83,54 @@ export interface SeriesNote {
   setting?: string;
 }
 
+/** The reader model's request to recall earlier events for lines that refer back to them. */
+export interface RecallRequest {
+  regions: string[];
+  who: string[];
+  keys: string[];
+}
+
+/** From the recall pass: which earlier event card (c1…) a region refers to. */
+export interface PsNote {
+  region: string;
+  card: string;
+  /** Short Vietnamese name of the earlier event. */
+  label?: string;
+}
+
 export interface PageNotes {
   names: NameNote[];
   address: AddressNote[];
   missed: MissedNote[];
   /** Only on the first page of a story without a profile (cold start). */
   series?: SeriesNote;
+  recall?: RecallRequest;
+  ps?: PsNote[];
+}
+
+/** A translator's "P/S": a line refers to an earlier event; where to re-read it. */
+export interface RecallNote {
+  regionId: string;
+  /** Ready to show, e.g. "P/S: lời hứa ở lễ hội — chương 3, trang 12." */
+  text: string;
+  label: string;
+  chapter: number;
+  page: number;
+  pageId: string;
+  /** The L1 card it comes from. */
+  event: string;
+}
+
+export interface RecallInfo {
+  /** What the reader model asked for. */
+  request: RecallRequest;
+  /** Cards found before the reading position. */
+  cards: number;
+  /** Regions whose translation the recall pass revised. */
+  revised: string[];
+  notes: RecallNote[];
+  ms: number;
+  costUsd: number;
 }
 
 export interface Usage {
@@ -129,6 +171,8 @@ export interface PageResult {
   missingIds: string[];
   /** Region ids recovered by the repair request. */
   repairedIds: string[];
+  /** Present when the page referred back to earlier events (prompt v4). */
+  recall?: RecallInfo;
   createdAt: string;
 }
 
@@ -159,5 +203,7 @@ export type TranslateEvent =
   | { type: "regions-added"; regions: TextRegion[] }
   /** Backgrounds reconstructed while the page was being translated (image data, never stored). */
   | { type: "patches"; patches: PatchData[]; ms: number; kept?: string[] }
+  /** P/S notes for lines that refer back to earlier events (after the recall pass revised them). */
+  | { type: "recall"; notes: RecallNote[] }
   | { type: "done"; result: PageResult }
   | { type: "error"; message: string; code?: string };

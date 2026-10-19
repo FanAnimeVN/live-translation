@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyDigests,
   applyMemoryUpdate,
   backgroundInput,
   emptyMemory,
   estimateTokens,
+  makeDigest,
+  makeOverview,
   MEMORY_BUDGET,
   mergePage,
   setEntityStatus,
@@ -64,7 +67,8 @@ describe("context v2", () => {
   it("never shows a summary written from later pages when reading earlier ones", () => {
     let mem = emptyMemory("s", "S");
     mem = mergePage(mem, "p9", pos(3, 9), notes(), [line("r1", "犯人はお前だ", "Hung thủ là cậu!")]).memory;
-    mem = applyMemoryUpdate(mem, { story_so_far: "Hung thủ đã lộ diện." }, pos(3, 9), "m");
+    const ch2 = makeDigest("chapter", [2, 2], "Hung thủ đã lộ diện.", [{ text: "x", pos: pos(2, 9), evidence: [] }], "m");
+    mem = applyDigests(mem, [ch2], makeOverview("Hung thủ đã lộ diện.", [ch2], "m"));
     expect(volatileContext(mem, pos(3, 9))).toContain("Hung thủ đã lộ diện");
     expect(volatileContext(mem, pos(2, 1))).not.toContain("Hung thủ");
   });
@@ -100,14 +104,15 @@ describe("context v2", () => {
   it("archives every summary and shows the story as it stood at the reading position", () => {
     let mem = emptyMemory("s", "S");
     mem = mergePage(mem, "p3", pos(1, 3), notes(), [line("r1", "a", "a")]).memory;
-    mem = applyMemoryUpdate(mem, { story_so_far: "Chương 1: hai người gặp nhau.", segment: "Họ gặp nhau." }, pos(1, 3), "m1");
+    mem = applyMemoryUpdate(mem, { segment: "Họ gặp nhau." }, pos(1, 3), "m1");
     mem = mergePage(mem, "p5", pos(2, 5), notes(), [line("r1", "b", "b")]).memory;
-    mem = applyMemoryUpdate(mem, { story_so_far: "Chương 2: một bí mật lộ ra.", segment: "Bí mật lộ ra." }, pos(2, 5), "m2");
+    mem = applyMemoryUpdate(mem, { segment: "Bí mật lộ ra." }, pos(2, 5), "m2");
     expect(mem.archive).toHaveLength(2);
     expect(mem.archive![0]).toMatchObject({ from: pos(1, 3), upTo: pos(1, 3), segment: "Họ gặp nhau.", model: "m1" });
-    expect(volatileContext(mem, pos(1, 9))).toContain("hai người gặp nhau"); // re-reading chapter 1
-    expect(volatileContext(mem, pos(1, 9))).not.toContain("bí mật");
-    expect(volatileContext(mem, pos(2, 6))).toContain("bí mật lộ ra");
+    expect(mem.archive![0].story).toBeUndefined(); // no rolling story any more
+    expect(volatileContext(mem, pos(1, 9))).toContain("Họ gặp nhau."); // re-reading chapter 1
+    expect(volatileContext(mem, pos(1, 9))).not.toContain("Bí mật");
+    expect(volatileContext(mem, pos(2, 6))).toContain("Bí mật lộ ra.");
     expect(volatileContext(mem, pos(2, 6))).toContain("Họ gặp nhau."); // recent developments
   });
 

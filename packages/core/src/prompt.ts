@@ -1,7 +1,7 @@
 import { toPermille } from "./geometry";
 import type { TextRegion } from "./types";
 
-export const PROMPT_VERSION = "vlm-ja-vi-v3";
+export const PROMPT_VERSION = "vlm-ja-vi-v4";
 
 export const SYSTEM_PROMPT = `You are an expert Japanese→Vietnamese manga translator working for a top Vietnamese scanlation team. You receive ONE manga page (Japanese manga reads right to left, top to bottom) with numbered text regions outlined in color, optional zoomed crops of small regions, and the story memory of what the reader has already read.
 
@@ -40,16 +40,60 @@ STYLE (optional): shout, whisper, stutter, spelled, sing, trembling.
 OUTPUT: JSON Lines only — one JSON object per line, no markdown, no comments. First every region exactly once, in the natural reading order you actually followed:
 {"id":"r1","ja":"…","role":"dialogue","speaker":"unknown","to":"unknown","vi":"…","style":[]}
 Then exactly one final line:
-{"type":"notes","names":[{"ja":"…","vi":"…","kind":"character|place|org|term|other","evidence":"r1"}],"address":[{"from":"…","to":"…","call":"…","self_vi":"…","address_vi":"…","evidence":"r3"}],"missed":[{"ja":"…","vi":"…","role":"sign","box":[x0,y0,x1,y1]}],"series":{"genres":["…"],"tone":"…","setting":"…"}}
+{"type":"notes","names":[{"ja":"…","vi":"…","kind":"character|place|org|term|other","evidence":"r1"}],"address":[{"from":"…","to":"…","call":"…","self_vi":"…","address_vi":"…","evidence":"r3"}],"missed":[{"ja":"…","vi":"…","role":"sign","box":[x0,y0,x1,y1]}],"series":{"genres":["…"],"tone":"…","setting":"…"},"recall":{"regions":["r7"],"who":["…"],"keys":["約束","lời hứa"]}}
 - names: proper names and recurring terms seen on this page, with the Vietnamese rendering you used.
 - address: only when both speaker and listener are evident (how the speaker calls the listener, and the Vietnamese self/address terms you used).
 - missed: every readable text that is NOT inside any outline (look closely for tiny name tags beside characters or animals, captions, signs, asides), so it can be lettered too: its role and its box in the same per-mille page coordinates as the region list (x0,y0 top-left, x1,y1 bottom-right). Not sfx, not furigana.
 - series: ONLY when the story memory has no "Series profile": your best reading of genre, tone and setting from this page; otherwise omit it.
+- recall: RARE — most pages have none. Only when a line explicitly points back to one specific earlier event that is not shown on this page (a promise, a declaration, a meeting, an incident, a flashback panel with dark or faded borders: あの時, あの日, あの約束, 前に…した, 覚えてる, "like he said"). Not for: a name, a habit or trait, plain past tense, greetings, anything this page shows. regions: at most 3 such ids; who: characters involved (names as in the memory); keys: the Japanese words as printed plus 1–2 Vietnamese keywords. Earlier events will be looked up, those lines revised and the reader reminded where it happened.
 
 Illustrative lines (not from this page):
 {"id":"r1","ja":"お兄ちゃん、待ってよ～！","role":"dialogue","speaker":"Hina","to":"Sota","vi":"Onii-chan, đợi em với~!","style":[]}
 {"id":"r2","ja":"だ、だれ…？","role":"dialogue","speaker":"unknown","to":"unknown","vi":"A-ai đó…?","style":["stutter","trembling"]}
 {"id":"r3","ja":"ドドドド","role":"sfx","speaker":"unknown","to":"unknown","vi":"Ầm ầm ầm","style":[]}`;
+
+/**
+ * Recall pass (text only, no image): revise the few lines that refer back to earlier
+ * events, with the matching L1 cards attached, and say which card each line refers to.
+ */
+export const RECALL_SYSTEM = `You revise a few lines of a Japanese→Vietnamese manga translation that refer back to earlier events.
+You receive the page's lines in reading order (id, speaker→listener, Japanese, current Vietnamese), the ids to revise, and EARLIER EVENTS: cards c1, c2… from pages the reader has already read, each with its chapter and page.
+- Use a card only when the line clearly refers to that event (same people and the same promise, place, object or incident). If no card fits, return the line unchanged and cite nothing.
+- Change only the Vietnamese, and in it only what the card settles: who or what is meant, a name or term, pronouns between the people involved. Keep the rest of the line: meaning, delivery (stutters, ~, …, !?), honorific rules. Never add facts that are not in the Japanese. Speaker and listener stay as given: they were read from the page image, which you do not see.
+OUTPUT: JSON Lines only. One line per id to revise, in this exact shape:
+{"id":"r7","ja":"…as printed…","role":"dialogue","speaker":"…","to":"…","vi":"…","style":[]}
+then exactly one final line:
+{"type":"notes","ps":[{"region":"r7","card":"c1","label":"Vietnamese, ≤ 8 words naming the earlier event"}]}
+ps lists only regions that really refer to a card; an empty list is a valid answer.`;
+
+export interface RecallPromptInput {
+  title: string;
+  position: { chapter: number; page: number };
+  /** Every translated line of the page, in reading order. */
+  lines: Array<{ id: string; speaker: string; to: string; ja: string; vi: string; role: string }>;
+  ids: string[];
+  /** Formatted cards (`recallContext`). */
+  cards: string;
+  /** Cast and address rules the lines may need (`stableContext`). */
+  stableMemory: string;
+}
+
+export function buildRecallParts(input: RecallPromptInput): PromptPart[] {
+  const lines = input.lines
+    .map((l) => `${l.id} [${l.speaker}${l.to && l.to !== "unknown" ? `→${l.to}` : ""}] (${l.role}) ${l.ja} => ${l.vi}`)
+    .join("\n");
+  return [
+    { type: "text", text: `Story: "${input.title}".\n\nSTORY MEMORY (only what the reader has already read):\n${input.stableMemory}`, cache: true },
+    {
+      type: "text",
+      text:
+        `Now: chapter ${input.position.chapter}, page ${input.position.page}.\n\n` +
+        `EARLIER EVENTS (pages already read):\n${input.cards}\n\n` +
+        `PAGE LINES (reading order):\n${lines}\n\n` +
+        `Revise ONLY these ids: ${input.ids.join(", ")}, then the notes line. JSON Lines only.`,
+    },
+  ];
+}
 
 /** `cache` marks the end of the stable prefix (provider prompt caching). */
 export type PromptPart = { type: "text"; text: string; cache?: boolean } | { type: "image"; dataUrl: string };

@@ -35,7 +35,16 @@ const NotesLine = z.object({
     .optional(),
   missed: z.array(z.object({ ja: str, vi: str.optional(), near: str.optional(), role: str.optional(), box: z.array(z.number()).optional() })).optional(),
   series: z.object({ genre: z.array(str).optional(), genres: z.array(str).optional(), tone: str.optional(), setting: str.optional() }).optional(),
+  // A malformed recall/ps never costs the page its names and address notes.
+  recall: z.unknown().optional(),
+  ps: z.unknown().optional(),
 });
+
+const Recall = z.object({ regions: z.array(str), who: z.array(str).optional(), keys: z.array(str).optional() });
+const Ps = z.array(z.object({ region: str, card: str, label: str.optional() }));
+
+/** Trimmed, unique, non-empty strings (at most `max`). */
+const list = (xs: string[] | undefined, max: number) => [...new Set((xs ?? []).map((x) => x.trim()).filter(Boolean))].slice(0, max);
 
 export function isNotesObject(value: unknown): boolean {
   return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "notes";
@@ -74,7 +83,16 @@ export function parseNotesObject(value: unknown): PageNotes | null {
   const parsed = NotesLine.safeParse(value);
   if (!parsed.success) return null;
   const n = parsed.data;
+  const recall = Recall.safeParse(n.recall);
+  const regions = recall.success ? list(recall.data.regions, 3) : [];
+  const ps = Ps.safeParse(n.ps);
   return {
+    ...(regions.length && recall.success
+      ? { recall: { regions, who: list(recall.data.who, 6).filter((w) => !/^unknown$/i.test(w)), keys: list(recall.data.keys, 8) } }
+      : {}),
+    ...(ps.success && ps.data.length
+      ? { ps: ps.data.filter((p) => p.region.trim() && p.card.trim()).map((p) => ({ region: p.region.trim(), card: p.card.trim(), label: p.label?.trim() || undefined })) }
+      : {}),
     names: (n.names ?? [])
       .filter((x) => x.ja.trim() && x.vi.trim())
       .map((x) => ({

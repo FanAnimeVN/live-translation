@@ -6,7 +6,7 @@
  *
  * Output (private): .private/eval/<runId>/<model>/<page>.json, summary.json, latest.json
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { cer, chrfScore, chrfStats, emptyMemory, mergePage, normalizeJa, percentile, type ChrfStats, type PageResult, type SeriesMemory } from "@lt/core";
 import { listPages, modelInfo, PRIVATE_DIR, readPageImage, spentUsd, translatePage } from "@lt/server";
@@ -27,6 +27,9 @@ const runs = Number(arg("runs", "1"));
 // Request fields applied to every model in this run, e.g. --extra '{"reasoning":{"enabled":false}}'.
 const extra = arg("extra", "") ? (JSON.parse(arg("extra", "{}")) as Record<string, unknown>) : undefined;
 const only = arg("pages", "").split(",").filter(Boolean);
+// --system-file <path>: another page prompt (A/B of prompt versions); --no-recall: skip the recall pass.
+const systemPrompt = arg("system-file", "") ? await readFile(arg("system-file", ""), "utf8") : undefined;
+const recall = !process.argv.includes("--no-recall");
 const runId = arg("run", new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19));
 const safe = (s: string) => s.replace(/[^a-zA-Z0-9._-]/g, "_");
 const outDir = join(PRIVATE_DIR, "eval", runId);
@@ -75,7 +78,7 @@ for (const model of models) {
       try {
         const result = await translatePage(
           { id: page.id, title: page.title, seriesId: page.seriesId, position: page.position, bytes: await readPageImage(page) },
-          { model, memory, extra },
+          { model, memory, extra, systemPrompt, recall },
         );
         memories.set(page.seriesId, mergePage(memory, page.id, page.position, result.notes, Object.values(result.translations)).memory);
         if (run === 1) await writeFile(join(dir, `${safe(page.id)}.json`), JSON.stringify(result), "utf8");

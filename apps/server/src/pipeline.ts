@@ -20,6 +20,15 @@ import {
   parseRegionObject,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
+  RECALL_SYSTEM,
+  buildRecallParts,
+  recallContext,
+  recallEvents,
+  RECALL_MIN_CHAPTERS,
+  psWorthy,
+  type PsNote,
+  type RecallInfo,
+  type VolatileOptions,
   type PageNotes,
   type PageResult,
   type ReadingPosition,
@@ -53,6 +62,12 @@ export interface TranslateOptions {
   extra?: Record<string, unknown>;
   /** Called once regions are known, before the model call: work that needs no translation starts here. */
   onDetected?: (page: DecodedPage, regions: TextRegion[]) => void;
+  /** L0 size and budget overrides (the K experiment); defaults come from the memory module. */
+  context?: VolatileOptions & { volatileTokens?: number };
+  /** Revise lines that refer back to earlier events with recalled cards (default on). */
+  recall?: boolean;
+  /** Another page prompt, for A/B runs of prompt versions (tools/eval/src/bakeoff.ts --system-file). */
+  systemPrompt?: string;
 }
 
 /**
@@ -77,6 +92,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
 
   const run = async (onlyIds?: string[]) => {
     const ids = new Set((onlyIds ?? regions.map((r) => r.id)).filter((id) => !translations[id]));
+    const keepRecall = notes.recall;
     const parser = new JsonObjectStream((value) => {
       if (isNotesObject(value)) {
         const n = parseNotesObject(value);
@@ -84,6 +100,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
           notes.names.push(...n.names);
           notes.address.push(...n.address);
           notes.missed.push(...n.missed);
+          notes.recall = keepRecall ?? n.recall;
           emit({ type: "notes", notes: n });
         }
         return;
@@ -107,7 +124,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     let raw = "";
     const stats = await streamChat({
       model: opts.model,
-      system: SYSTEM_PROMPT,
+      system: opts.systemPrompt ?? SYSTEM_PROMPT,
       parts: await requestParts(page, decoded, regions, opts, onlyIds),
       purpose: onlyIds ? "repair" : "translate-page",
       pageId: page.id,
@@ -150,6 +167,8 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     notes.missed = notes.missed.filter((m) => !placed.some((p) => p.note === m));
   }
 
+  const recall = await recallPass();
+
   const result: PageResult = {
     pageId: page.id,
     seriesId: page.seriesId,
@@ -159,7 +178,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     translations,
     notes,
     model: opts.model,
-    promptVersion: PROMPT_VERSION,
+    promptVersion: opts.systemPrompt ? "custom" : PROMPT_VERSION,
     timings: {
       detectMs: Math.round(det.ms),
       ttfbMs: ttfbMs === undefined ? undefined : Math.round(ttfbMs),
@@ -169,10 +188,93 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     usage,
     missingIds: missing,
     repairedIds,
+    ...(recall ? { recall } : {}),
     createdAt: new Date().toISOString(),
   };
   emit({ type: "done", result });
   return result;
+
+  /**
+   * Lines the reader model flagged as referring back to earlier events: look up L1 cards
+   * written before this page, and when some match, run one small text-only pass over just
+   * those lines with the cards attached. P/S notes come only from cards the pass cites.
+   */
+  async function recallPass(): Promise<RecallInfo | undefined> {
+    const request = notes.recall;
+    if (!request || opts.recall === false || opts.model.startsWith("mock/")) return undefined;
+    const t1 = performance.now();
+    const info: RecallInfo = { request, cards: 0, revised: [], notes: [], ms: 0, costUsd: 0 };
+    const ids = request.regions.filter((id) => translations[id] && translations[id].role !== "none");
+    const cards = ids.length
+      ? recallEvents(opts.memory, page.position, { who: request.who, keys: request.keys, text: ids.map((id) => translations[id].ja).join(" "), minChaptersBack: RECALL_MIN_CHAPTERS }, 4)
+      : [];
+    info.cards = cards.length;
+    if (!cards.length) {
+      info.ms = Math.round(performance.now() - t1);
+      return info;
+    }
+    const ps: PsNote[] = [];
+    const valid = new Set(ids);
+    const parser = new JsonObjectStream((value) => {
+      if (isNotesObject(value)) {
+        ps.push(...(parseNotesObject(value)?.ps ?? []));
+        return;
+      }
+      const t = parseRegionObject(value, valid, 0);
+      const prev = t && translations[t.id];
+      if (!t || !prev || !t.vi || t.vi === prev.vi) return;
+      // Only the Vietnamese may change: the source reading, role, speaker and listener were read
+      // from the image, which this text-only pass never sees.
+      translations[t.id] = { ...prev, vi: t.vi, fixes: [...prev.fixes, ...t.fixes, "recall"] };
+      if (!info.revised.includes(t.id)) info.revised.push(t.id);
+      emit({ type: "region", t: translations[t.id], atMs: Math.round(performance.now() - t0) });
+    });
+    const order = Object.values(translations).sort((a, b) => a.seq - b.seq);
+    const stats = await streamChat({
+      model: opts.model,
+      system: RECALL_SYSTEM,
+      parts: buildRecallParts({
+        title: page.title,
+        position: page.position,
+        lines: order.filter((t) => t.role !== "none").map((t) => ({ id: t.id, speaker: t.speaker, to: t.to, ja: t.ja, vi: t.vi, role: t.role })),
+        ids,
+        cards: recallContext(cards),
+        stableMemory: stableContext(opts.memory, page.position),
+      }),
+      purpose: "recall",
+      pageId: page.id,
+      signal: opts.signal,
+      maxTokens: 1200,
+      onText: (d) => parser.push(d),
+    });
+    usage.promptTokens += stats.promptTokens ?? 0;
+    usage.completionTokens += stats.completionTokens ?? 0;
+    usage.cachedTokens += stats.cachedTokens ?? 0;
+    usage.costUsd += stats.costUsd;
+    info.costUsd = stats.costUsd;
+    // A P/S only for an important event dozens of chapters back, and one per page at most:
+    // the cited card with the highest importance, then the oldest.
+    const cited = ps
+      .map((p) => ({ p, c: cards[Number(p.card.replace(/^c/i, "")) - 1] }))
+      .filter(({ p, c }) => c && valid.has(p.region) && psWorthy(c, page.position))
+      .sort((a, b) => (b.c.event.importance ?? 1) - (a.c.event.importance ?? 1) || a.c.at.chapter - b.c.at.chapter)
+      .slice(0, 1);
+    for (const { p, c } of cited) {
+      const label = (p.label || c.event.text).replace(/[.。]+$/, "").slice(0, 80);
+      info.notes.push({
+        regionId: p.region,
+        label,
+        chapter: c.at.chapter,
+        page: c.at.page,
+        pageId: c.pageId,
+        event: c.event.text,
+        text: `P/S: ${label} — chương ${c.at.chapter}, trang ${c.at.page}.`,
+      });
+    }
+    if (info.notes.length) emit({ type: "recall", notes: info.notes });
+    info.ms = Math.round(performance.now() - t1);
+    return info;
+  }
 
   async function placeMissed(d: DecodedPage, rs: TextRegion[], missed: MissedNote[]): Promise<Array<{ region: TextRegion; note: MissedNote }>> {
     const out: Array<{ region: TextRegion; note: MissedNote }> = [];
@@ -201,7 +303,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
       title: p.title,
       position: p.position,
       stableMemory: stableContext(o.memory, p.position),
-      volatileMemory: volatileContext(o.memory, p.position),
+      volatileMemory: volatileContext(o.memory, p.position, o.context?.volatileTokens, o.context),
       regions: rs,
       image: { w: d.w, h: d.h },
       markedPageDataUrl: await markedPageDataUrl(d, rs),

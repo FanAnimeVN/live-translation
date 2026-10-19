@@ -476,3 +476,5 @@ export function cornersFlat(img: RGBAImage, b: Box): boolean {
     return flatness > 0.9 && inkShare < 0.05 && Math.abs(bg[0] - center[0]) + Math.abs(bg[1] - center[1]) + Math.abs(bg[2] - center[2]) < 40;
   });
 }
+
+export * from "./notes";

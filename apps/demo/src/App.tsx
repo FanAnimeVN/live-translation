@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { EntryStatus, PageResult, RegionTranslation, SeriesMemory, TextRegion } from "@lt/core";
-import { LETTERING_FONT, renderTranslation, type Ctx2D, type PatchImage, type RegionRender } from "@lt/render";
+import { findGutters, type EntryStatus, type Gutter, type PageResult, type RecallNote, type RegionTranslation, type SeriesMemory, type TextRegion } from "@lt/core";
+import { drawNotes, LETTERING_FONT, placeNotes, renderTranslation, type Ctx2D, type NotePlacement, type PatchImage, type RegionRender } from "@lt/render";
 import { api, translateStream, type ModelInfo, type PageInfo } from "./api";
 
 type Status = "idle" | "cached" | "detecting" | "translating" | "done" | "error";
@@ -13,7 +13,12 @@ interface PageState {
   error?: string;
   cacheMs?: number;
   live?: { detectMs?: number; firstMs?: number };
+  /** P/S notes streamed by the recall pass (also in result.recall once done). */
+  ps?: RecallNote[];
 }
+
+/** P/S for lines that refer back to earlier events: off, a tappable dot (default), or lettered in a gutter. */
+type PsMode = "off" | "subtle" | "on";
 
 const NS = "demo";
 /** Pages translated ahead of the reader when prefetch is on. */
@@ -57,6 +62,7 @@ export function App() {
   const [keptArt, setKeptArt] = useState<Record<string, string[]>>({});
   // Translate the next pages ahead of the reader. Opt-in: it spends credits on pages not opened yet.
   const [prefetchOn, setPrefetchOn] = useState(false);
+  const [psMode, setPsMode] = useState<PsMode>("subtle");
   const requested = useRef(new Set<string>());
   const inflight = useRef(new Set<string>());
 
@@ -134,6 +140,7 @@ export function App() {
               live: { ...s.live, firstMs: s.live?.firstMs ?? performance.now() - t0 },
             }));
           else if (e.type === "regions-added") patch(p.id, (s) => ({ ...s, regions: [...s.regions, ...e.regions] }));
+          else if (e.type === "recall") patch(p.id, (s) => ({ ...s, ps: e.notes }));
           else if (e.type === "patches") {
             // Backgrounds reconstructed while the model was still translating.
             e.patches.forEach((x) => requested.current.add(`${key}|${x.id}`));
@@ -201,6 +208,8 @@ export function App() {
   }, [state.translations, edits]);
 
   const sel = selected ? { region: state.regions.find((r) => r.id === selected), t: translations[selected] } : undefined;
+  const psNotes = useMemo(() => state.result?.recall?.notes ?? state.ps ?? NO_NOTES, [state.result, state.ps]);
+  const selPs = selected ? psNotes.find((n) => n.regionId === selected) : undefined;
   const ordered = [...state.regions].sort((a, b) => (translations[a.id]?.seq ?? 999 + a.order) - (translations[b.id]?.seq ?? 999 + b.order));
   const series = memory;
 
@@ -260,6 +269,14 @@ export function App() {
         <label className="toggle">
           <input type="checkbox" checked={inpaintOn} onChange={(e) => setInpaintOn(e.target.checked)} /> Xóa chữ trên tranh (inpaint)
         </label>
+        <label title="Khi một câu nhắc lại chuyện cũ, ghi chú P/S chỉ chương/trang để đọc lại. Không bao giờ đè lên tranh; “Xem bản gốc” ẩn tất cả.">
+          P/S nhắc chuyện cũ{" "}
+          <select value={psMode} onChange={(e) => setPsMode(e.target.value as PsMode)}>
+            <option value="off">Tắt</option>
+            <option value="subtle">Kín đáo (chấm bấm xem)</option>
+            <option value="on">Hiện trong khe tranh</option>
+          </select>
+        </label>
         <label className="toggle" title="Dịch sẵn các trang kế tiếp trong lúc bạn đọc, để lật trang là có ngay. Tốn credit cho cả trang chưa mở.">
           <input type="checkbox" checked={prefetchOn} onChange={(e) => setPrefetchOn(e.target.checked)} /> Dịch trước {PREFETCH_PAGES} trang kế
           {perPage !== undefined ? ` (~$${perPage.toFixed(4)}/trang)` : ""}
@@ -300,6 +317,8 @@ export function App() {
             patches={inpaintOn ? patches[patchKey] : undefined}
             keep={keptArt[patchKey]}
             onNeedInpaint={state.status === "done" || state.status === "cached" ? requestInpaint : undefined}
+            notes={psMode === "off" ? NO_NOTES : psNotes}
+            psMode={psMode}
           />
         )}
         <div className={`status ${state.status}`}>
@@ -336,6 +355,7 @@ export function App() {
                       value={edits[sel.region.id] ?? sel.t.vi}
                       onChange={(e) => setEdits((x) => ({ ...x, [sel.region!.id]: e.target.value }))}
                     />
+                    {selPs && <div className="ps-note">{selPs.text}</div>}
                     <div className="meta">
                       Người nói: {sel.t.speaker} → {sel.t.to}
                       {sel.t.style.length ? ` · ${sel.t.style.join(", ")}` : ""}
@@ -457,6 +477,14 @@ export function App() {
                   <tr><td>Token vào / ra</td><td>{state.result.usage.promptTokens ?? "—"} / {state.result.usage.completionTokens ?? "—"}</td></tr>
                   <tr><td>Chi phí trang này</td><td>${(state.result.usage.costUsd ?? 0).toFixed(5)}</td></tr>
                   <tr><td>Vùng thiếu / đã sửa</td><td>{state.result.missingIds.join(", ") || "0"} / {state.result.repairedIds.join(", ") || "0"}</td></tr>
+                  <tr>
+                    <td>Nhắc chuyện cũ (recall)</td>
+                    <td>
+                      {state.result.recall
+                        ? `vùng ${state.result.recall.request.regions.join(", ")} · ${state.result.recall.cards} thẻ khớp · sửa ${state.result.recall.revised.length} · P/S ${state.result.recall.notes.length} · ${fmt(state.result.recall.ms)} · $${state.result.recall.costUsd.toFixed(5)}`
+                        : "không cần"}
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             ) : (
@@ -481,10 +509,16 @@ function Viewer(props: {
   patches?: Record<string, PatchImage>;
   keep?: string[];
   onNeedInpaint?: (ids: string[]) => void;
+  notes: RecallNote[];
+  psMode: PsMode;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [img, setImg] = useState<HTMLImageElement>();
   const [renders, setRenders] = useState<RegionRender[]>([]);
+  const [placed, setPlaced] = useState<NotePlacement[]>([]);
+  const [openPs, setOpenPs] = useState<string>();
+  // Gutters come from the original page pixels, once per image.
+  const gutters = useRef<{ img?: HTMLImageElement; list: Gutter[] }>({ list: [] });
 
   useEffect(() => {
     const el = new Image();
@@ -501,20 +535,39 @@ function Viewer(props: {
       const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
       ctx.drawImage(img, 0, 0);
       if (props.showOriginal) {
+        // "View original" restores the exact source: no lettering, no P/S.
         setRenders([]);
+        setPlaced([]);
         return;
       }
+      if (props.psMode === "on" && props.notes.length && gutters.current.img !== img)
+        gutters.current = { img, list: findGutters(ctx.getImageData(0, 0, canvas.width, canvas.height)) };
       const rendered = renderTranslation(ctx as unknown as Ctx2D, { w: canvas.width, h: canvas.height }, props.regions, props.translations, {
         patches: props.patches,
         keep: props.keep ? new Set(props.keep) : undefined,
       });
       setRenders(rendered);
+      const inputs = props.notes.flatMap((n) => {
+        const r = props.regions.find((x) => x.id === n.regionId);
+        return r ? [{ id: n.regionId, text: n.text, anchor: r.bubble ?? r.box }] : [];
+      });
+      const family = `"${LETTERING_FONT}", "Patrick Hand", sans-serif`;
+      const measure = (t: string, px: number) => {
+        ctx.font = `italic ${px}px ${family}`;
+        return ctx.measureText(t).width;
+      };
+      // Subtle: dots only. On: lettered in the nearest gutter with room, else a dot.
+      const notes = placeNotes(inputs, props.psMode === "on" ? gutters.current.list : [], measure, { w: canvas.width, h: canvas.height }, {
+        avoid: props.regions.map((r) => r.bubble ?? r.box),
+      });
+      drawNotes(ctx as unknown as Ctx2D, notes, family);
+      setPlaced(notes);
       const need = rendered.filter((r) => r.needsInpaint).map((r) => r.id);
       if (need.length) props.onNeedInpaint?.(need);
     });
     return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img, props.regions, props.translations, props.showOriginal, props.fontReady, props.patches, props.keep, props.onNeedInpaint]);
+  }, [img, props.regions, props.translations, props.showOriginal, props.fontReady, props.patches, props.keep, props.onNeedInpaint, props.notes, props.psMode]);
 
   const onClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const c = e.currentTarget;
@@ -554,6 +607,25 @@ function Viewer(props: {
               </button>
             );
           })}
+        {!props.showOriginal &&
+          placed
+            .filter((p) => p.mode === "dot")
+            .map((p) => (
+              <button
+                key={`ps-${p.id}`}
+                className={`marker ps${openPs === p.id ? " open" : ""}${p.box.x < w / 2 ? " left" : ""}`}
+                style={{ left: `${(p.box.x / w) * 100}%`, top: `${(p.box.y / h) * 100}%` }}
+                title={p.text}
+                aria-label={p.text}
+                onClick={() => {
+                  setOpenPs((cur) => (cur === p.id ? undefined : p.id));
+                  props.onSelect(p.id);
+                }}
+              >
+                P/S
+                {openPs === p.id && <span className="ps-pop">{p.text}</span>}
+              </button>
+            ))}
         {props.selected &&
           (() => {
             const r = props.regions.find((x) => x.id === props.selected);
@@ -592,6 +664,8 @@ async function loadPatchImages(
   );
   return loaded;
 }
+
+const NO_NOTES: RecallNote[] = [];
 
 const fmt = (ms?: number) => (ms === undefined ? "—" : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`);
 
