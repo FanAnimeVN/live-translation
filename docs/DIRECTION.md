@@ -62,11 +62,11 @@ Code cũ không bị xóa: nằm trong `legacy/` và tag git `legacy-v0`.
 | Gemini 3.7 Flash | 31/81 | 23,9% | 4,30 s | 8,05 s | $0,0098 | 0 |
 
 Cách đọc: nhãn GT có lỗi (ví dụ nhãn ghi ぎっそく, ảnh là さっそく), nên CER chỉ là chỉ báo đọc chữ, **chưa phải điểm chất lượng dịch**. Một lượt mỗi model, chưa phải p95.
-Mặc định tạm thời: **Haiku 5.5** (rẻ nhất, không lỗi tuân thủ); tầng nhanh/chất lượng: **Gemini 3.7 Flash**. Chốt sau khi nhóm chấm mù bản dịch.
+**Quyết định 19/10 (chấm mù 109 vùng bằng GPT-5.6, prompt v3, một lượt):** mặc định **Gemini 3.1 Flash-Lite** (đúng nghĩa 2,64/3, lỗi nghiêm trọng 4%, ~$0,005/trang, chậm: bóng đầu ~10 s); lựa chọn nhanh **DeepSeek V4.1 Flash 1017** (bóng đầu ~2,8 s, trang ~6,6 s, $0,0007/trang, lỗi nghiêm trọng 15%); Haiku 5.5 ở giữa (9%). Hướng cho extension: trang người đọc đang chờ dùng model nhanh, các trang dịch trước dùng model chất lượng. Chốt lại sau khi nhóm chấm mù. Chi tiết: [DEMO.md](DEMO.md).
 
 **Ứng viên mới (19/10, một lượt, 10 trang, cùng điều kiện):** Gemini 3.8 Flash đọc chữ tốt nhất (CER 24,0%) nhưng ~$0,009/trang; MiMo-V2.6-Flash đọc kém nhất (CER 40%) và chậm (29 s/trang); Qwen3.7-Flash và Qwen3.8-Omni-Flash (chỉ Alibaba phục vụ) từ chối 2–3/10 trang truyện bình thường vì bộ lọc nội dung. Muse Spark loại vì giá và vì bản rẻ cho Meta dùng dữ liệu để huấn luyện.
 
-**Model tóm tắt nền (chấm mù bằng GPT-5.6, cùng đầu vào):** DeepSeek V4.1 Flash trung thành nhất (2,0/3, ít lỗi nhất), ~$0,0002–0,0003 mỗi lần khi chọn nhà cung cấp rẻ nhất; MiMo/GLM viết đủ ý hơn nhưng thêm thắt sai (1,0/3); Qwen3.7-Flash kém nhất (0,5/3). Giữ DeepSeek.
+**Model tóm tắt nền (chấm mù bằng GPT-5.6, cùng đầu vào):** DeepSeek V4.1 Flash 1017 trung thành nhất (2,0/3, 4 lỗi, ~10 s, ~$0,0005 mỗi lần) — dùng làm mặc định; DeepSeek V4.1 Flash bản thường 1,5–2,0 nhưng chậm (40–80 s); Haiku, Gemini Flash-Lite, MiMo, GLM 1,0–1,5; Qwen3.7-Flash kém nhất (0,5/3).
 
 **Đọc chữ so với nhãn:** 29/81 nhãn có hai model khác hãng đọc giống nhau nhưng khác nhãn (nghi nhãn sai trước); 14/81 là ca khó thật. Bảng phân xử riêng: `.private/eval/ocr-audit.json` (không sửa dataset).
 
