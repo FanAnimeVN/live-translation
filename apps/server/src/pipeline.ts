@@ -1,8 +1,10 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  activeNames,
   applyRegionRules,
   area,
+  atOrBefore,
   buildUserParts,
   center,
   clampBox,
@@ -39,7 +41,7 @@ import {
   type TranslateEvent,
 } from "@lt/core";
 import { detect, detectInCrop } from "./detector";
-import { decodeImage, markedPageDataUrl, regionCrops, type DecodedPage } from "./image";
+import { decodeImage, faceCrop, markedPageDataUrl, regionCrops, type DecodedPage } from "./image";
 import { mockReply } from "./mock";
 import { streamChat } from "./openrouter";
 import { PRIVATE_DIR } from "./env";
@@ -72,6 +74,36 @@ export interface TranslateOptions {
   recall?: boolean;
   /** Another page prompt, for A/B runs of prompt versions (tools/eval/src/bakeoff.ts --system-file). */
   systemPrompt?: string;
+  /**
+   * Bytes of a page already read, by id: lets the request show the faces of the characters in the
+   * scene (cropped from the box the memory kept). Omitted → no face references.
+   */
+  refImage?: (pageId: string) => Promise<Buffer | undefined>;
+}
+
+/** Face references per request: ~25 image tokens each on Claude at 128 px. */
+const MAX_FACE_REFS = 6;
+
+/** Characters most likely on this page (active in the latest dialogue first) whose face the memory located. */
+async function faceReferences(p: PageInput, o: TranslateOptions): Promise<Array<{ name: string; ja: string; dataUrl: string }>> {
+  if (!o.refImage) return [];
+  const active = activeNames(o.memory, p.position);
+  const chars = o.memory.entities
+    .filter((e) => e.kind === "character" && e.ref && e.ref.pageId !== p.id && e.status !== "rejected" && atOrBefore(e.knownFrom, p.position))
+    .sort((a, b) => Number(active.has(b.vi)) - Number(active.has(a.vi)) || (b.seen ?? 1) - (a.seen ?? 1))
+    .slice(0, MAX_FACE_REFS);
+  const pages = new Map<string, DecodedPage | undefined>();
+  const out: Array<{ name: string; ja: string; dataUrl: string }> = [];
+  for (const e of chars) {
+    const id = e.ref!.pageId;
+    if (!pages.has(id)) {
+      const bytes = await o.refImage(id).catch(() => undefined);
+      pages.set(id, bytes ? await decodeImage(bytes) : undefined);
+    }
+    const d = pages.get(id);
+    if (d) out.push({ name: e.vi, ja: e.ja, dataUrl: await faceCrop(d, e.ref!.box) });
+  }
+  return out;
 }
 
 /**
@@ -319,6 +351,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
       image: { w: d.w, h: d.h },
       markedPageDataUrl: await markedPageDataUrl(d, rs),
       crops: await regionCrops(d, rs, onlyIds ?? cropIds),
+      castRefs: await faceReferences(p, o),
       onlyIds,
     });
   }

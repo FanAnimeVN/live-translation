@@ -11,3 +11,5 @@ export * from "./erase";
 export * from "./artmask";
 export * from "./metrics";
 export * from "./gutters";
+export * from "./balloon";
+export * from "./cast";

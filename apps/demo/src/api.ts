@@ -1,4 +1,4 @@
-import type { PageResult, ReadingPosition, SeriesMemory, TranslateEvent, EntryStatus } from "@lt/core";
+import type { CastAnswer, CastQuestion, PageResult, ReadingPosition, SeriesMemory, TranslateEvent, EntryStatus } from "@lt/core";
 
 export interface PageInfo {
   id: string;
@@ -34,6 +34,12 @@ export const api = {
     json<SeriesMemory>(`/api/memory?${new URLSearchParams({ seriesId, ns, title })}`),
   setEntity: (body: { ns: string; seriesId: string; ja: string; status: EntryStatus; vi?: string }) =>
     json<SeriesMemory>("/api/memory/entity", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  questions: (seriesId: string, ns: string, pos: ReadingPosition) =>
+    json<{ questions: Array<CastQuestion & { sample: Array<{ speaker: string; to?: string; ja: string; vi: string }> }> }>(
+      `/api/memory/questions?${new URLSearchParams({ seriesId, ns, chapter: String(pos.chapter), page: String(pos.page) })}`,
+    ),
+  answer: (body: { ns: string; seriesId: string; question: CastQuestion; answer: CastAnswer; pos: ReadingPosition }) =>
+    json<SeriesMemory>("/api/memory/answer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   resetMemory: (body: { ns: string; seriesId: string; title: string }) =>
     json<{ ok: boolean }>("/api/memory/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   inpaint: (body: { pageId: string; model: string; ns: string; ids: string[] }) =>

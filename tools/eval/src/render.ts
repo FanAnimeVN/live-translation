@@ -4,6 +4,9 @@
  *
  *   npx tsx tools/eval/src/render.ts <model> [pageId...] [--eval <runId>] [--debug] [--no-inpaint]
  *
+ * Shaped lettering is listed as id:angle (~ curved, =n printed lines) and id!stacked|across (a shout).
+ * --no-balloons keeps saved regions as they are (no balloon search in the pixels).
+ *
  * Per page it reports: regions lettered, regions still waiting for inpainting,
  * leftover Japanese under lettering (residue), overflow, lettering overlapping other
  * lettering or unerased text, and lettering leaving its balloon.
@@ -13,7 +16,7 @@ import { join } from "node:path";
 import { createCanvas, GlobalFonts, loadImage } from "@napi-rs/canvas";
 import { expand, intersect, type Box, type PageResult } from "@lt/core";
 import { LETTERING_FONT, MAX_RESIDUE, quadsTouch, renderTranslation, type Ctx2D, type PatchImage, type RegionRender } from "@lt/render";
-import { charSizesFor, decodeImage, getPage, INPAINT_DEVICE, INPAINT_ENGINE, inpaintRegions, listPages, loadResult, PRIVATE_DIR, readPageImage, ROOT, warmInpainters } from "@lt/server";
+import { adoptPageBalloons, charSizesFor, decodeImage, getPage, INPAINT_DEVICE, INPAINT_ENGINE, inpaintRegions, listPages, loadResult, PRIVATE_DIR, readPageImage, ROOT, warmInpainters } from "@lt/server";
 import type { Rejected } from "../../../apps/server/src/inpaint";
 
 GlobalFonts.registerFromPath(join(ROOT, "apps", "demo", "public", "fonts", "PatrickHand-Regular.ttf"), LETTERING_FONT);
@@ -62,6 +65,8 @@ for (const page of pages) {
   const result = await load(page.id);
   if (!result) continue;
   const d = await decodeImage(await readPageImage(page));
+  // Results saved before balloons were looked for in the pixels get them now (as detection does).
+  if (!args.includes("--no-balloons")) result.regions = await adoptPageBalloons(d, result.regions);
   const canvas = createCanvas(d.w * 2, d.h);
   const ctx = canvas.getContext("2d");
   ctx.drawImage(d.canvas, 0, 0);
@@ -170,8 +175,11 @@ function score(pageId: string, result: PageResult, renders: RegionRender[], inpa
     outsideBalloon,
     inpaintMs,
     rejected: rejected.map((r) => `${r.id}:${r.reason}`),
-    shaped: lettered
-      .filter((r) => r.angle !== undefined)
-      .map((r) => `${r.id}:${((r.angle! * 180) / Math.PI).toFixed(0)}${r.curved ? "~" : ""}${r.printedLines ? `=${r.printedLines}` : ""}`),
+    shaped: [
+      ...lettered
+        .filter((r) => r.angle !== undefined)
+        .map((r) => `${r.id}:${((r.angle! * 180) / Math.PI).toFixed(0)}${r.curved ? "~" : ""}${r.printedLines ? `=${r.printedLines}` : ""}`),
+      ...lettered.filter((r) => r.display).map((r) => `${r.id}!${r.display}`),
+    ],
   };
 }

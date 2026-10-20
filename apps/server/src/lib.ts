@@ -2,7 +2,7 @@ export { env, ROOT, PRIVATE_DIR } from "./env";
 export { listPages, getPage, readPageImage, type DatasetPage, type GtBubble } from "./dataset";
 export { decodeImage, markedPageDataUrl, regionCrops } from "./image";
 export { streamChat } from "./openrouter";
-export { detect, detectInCrop, loadDetector } from "./detector";
+export { adoptPageBalloons, detect, detectInCrop, loadDetector } from "./detector";
 export { translatePage } from "./pipeline";
 export { MODELS, DEFAULT_MODEL, modelInfo } from "./models";
 export { loadMemory, saveMemory } from "./memoryStore";

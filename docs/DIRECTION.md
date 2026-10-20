@@ -229,14 +229,19 @@ Bộ hiện có: 419 ô thoại trên 25 trang của nhóm (`?run=team25`). Đi�
 | Giữ Space để xem bản gốc | ✅ | ✅ (phím tắt trong extension) | ✅ |
 | Bấm một bóng: xem JP gốc, sửa bản dịch | ✅ | ✅ | ✅ + dịch lại riêng bóng đó |
 | Bộ nhớ truyện + Đúng/Đổi/Bỏ | ✅ cơ bản | ✅ | ✅ Side Panel, lịch sử, export/import |
-| Extension chạy trên trang web thật | — | ✅ v0.1 | ✅ + trang raw nhóm chọn |
-| Cloud: tài khoản + credit | — | — | ✅ (thanh toán chế độ test) |
+| Extension chạy trên trang web thật | — | — | Sau MVP (nhóm chốt 20/10: MVP không cần extension) |
+| Cloud: tài khoản + credit | — | — | Sau MVP (giá đã tính: [COST-PRICING.md](COST-PRICING.md)) |
 | Local/offline (Ollama) | — | — | ✅ có hướng dẫn cài |
-| Đọc file ZIP/ảnh của mình | — | — | ✅ |
+| Đọc thư mục ảnh/ZIP của mình (thay extension trong MVP) | — | — | ✅ dịch trước trang kế, cache |
+| Gán người nói + xưng hô, đo PCA trên nhãn của nhóm | — | — | ✅ ([PROPOSAL-REVIEW.md §7, §9](PROPOSAL-REVIEW.md)) |
 | "Tóm tắt đến đây" không spoil | — | — | ✅ |
 | Chat hỏi về truyện, mobile, thêm ngôn ngữ | — | — | Sau MVP |
 
 ## 6. Mô hình kinh doanh (giả thuyết, chốt sau khi đo chi phí thật)
+
+Số đo 20/10 (~18 đ/trang với DeepSeek; một bộ 200–300 chương ~80–120k tiền model), các cách giảm chi phí và đề xuất gói
+39k (1.000 trang) / 99k (8.000 trang) / nạp thêm, chọn bằng mô phỏng thói quen đọc: [COST-PRICING.md](COST-PRICING.md). Đối chiếu với proposal của nhóm và kịch bản thuyết trình 5 phút:
+[PROPOSAL-REVIEW.md](PROPOSAL-REVIEW.md).
 
 - **Miễn phí:** BYOK với key Gemini free tier, hoặc chế độ local. Chậm hơn hoặc bị giới hạn lượt.
 - **Gói credit cloud:** 1 credit ≈ 1 trang chế độ nhanh; chế độ chất lượng cao tốn nhiều credit hơn.

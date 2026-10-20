@@ -9,8 +9,9 @@ import { detectInCrop } from "./detector";
 import { INPAINT_DEVICE, INPAINT_ENGINE, LAMA_DEVICE, sessionOptions, type InpaintDevice } from "./device";
 import { ROOT } from "./env";
 import type { DecodedPage } from "./image";
+import { CTD_FILE, CTD_INPUT, CTD_SHA256 } from "./ctd";
 import { LAMA_MODELS, loadLama, runLama, type LamaVariant } from "./lama";
-import { clearOthers, keepPictures, snapBoxesToPaper, snapToPaper, textColours, wholeBoxes, withNeighbours } from "./redraw";
+import { clearOthers, keepGrey, keepPictures, snapBoxesToPaper, snapToPaper, textColours, wholeBoxes, withNeighbours } from "./redraw";
 
 /** andraniksargsyan/migan @ 406830d0fa60666da0071c342ad2fbc8f30c5c64, MIT (Picsart AI Research). */
 export const MIGAN_FILE = join(ROOT, "models", "inpaint", "migan_pipeline_v2.onnx");
@@ -42,14 +43,8 @@ export const TEXTMASK_FILE = join(ROOT, "models", "textmask", "comic_text_mask_3
 export const TEXTMASK_SHA256 = "e8b5cb31222581b5c8b9ac9a567d5cac578f52c1db890e7045bd41ce453fcd01";
 const TM = 384;
 
-/**
- * comic-text-detector (dmMaze, GPL-3.0; trained on Manga109-s, Digital Comic Museum and synthetic
- * pages), the ONNX that manga-image-translator publishes (release beta-0.3, comictextdetector.pt.onnx,
- * used as is). Its "seg" output marks text pixels on the whole page from a 1024x1024 letterbox.
- */
-export const CTD_FILE = join(ROOT, "models", "textmask", "comictextdetector.pt.onnx");
-export const CTD_SHA256 = "1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f";
-const CTD = 1024;
+/** comic-text-detector (see ./ctd): its "seg" output marks text pixels on the whole page from a 1024x1024 letterbox. */
+const CTD = CTD_INPUT;
 
 /** Learned text-mask models: comic-text-mask on each region's crop, comic-text-detector on the page. */
 export type TextMaskModel = "ctm" | "ctd";
@@ -357,6 +352,7 @@ export async function inpaintRegions(
     } else if (!patchBlends(full, result, job).ok) {
       rejected.push({ id: r.id, reason: "visible-patch", coverage: job.coverage });
     }
+    keepGrey(full, result, job);
     snapToPaper(full, result, job, masked);
     // Text on a paper strip or in an open balloon that still shows ink: rebuild its boxes from the source.
     if (residueAfter(full, result, job, members, cs) > MAX_RESIDUE_AFTER) job = snapBoxesToPaper(full, result, job, first, members, cs ?? 16);

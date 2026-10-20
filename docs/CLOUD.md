@@ -19,6 +19,7 @@ Một mã nguồn TypeScript cho cả hai: `packages/core` (logic), `packages/re
 |---|---|---|---|
 | Lấy ảnh | extension tải ảnh, nén JPEG ~1 280 px (~150–250 KB) rồi gửi | server tải theo link | điện thoại mạng yếu không phải upload; ảnh chỉ ở RAM, không lưu |
 | Tìm vùng chữ (detector 11 MB) | server (~0,3 s CPU) | server | đơn giản, như nhau trên mọi máy; sau này có thể chạy WebGPU trên desktop |
+| Detector thứ hai cho chữ bị sót (comic-text-detector 95 MB, `apps/server/src/ctd.ts`) | bản miễn phí / chạy trên máy: bật khi có GPU (+0,1 s/trang), tắt trên máy chỉ có CPU (1,6 s/trang) | như desktop | **gói cloud trả phí phải đặt `DETECT_CTD=0`**: model học trên Manga109-s, chỉ được dùng cho học thuật. Trên 60 trang nó tìm lại 17/32 ô chữ detector chính bỏ sót |
 | Đọc + dịch (model vision) | server gọi OpenRouter, key nằm ở server, stream từng bóng về | như desktop | không lộ key, tính credit được |
 | Vẽ lại nền tranh | trình duyệt (MI-GAN 28 MB, WebGPU ~0,1–0,2 s/vùng) | server (MI-GAN CPU ~0,9 s/vùng, chạy song song lúc dịch) | điện thoại chạy model chậm, tốn pin |
 | Dàn chữ, "Xem bản gốc", sửa bóng | trình duyệt | trình duyệt | nhẹ; bản gốc khôi phục đúng từng điểm ảnh |

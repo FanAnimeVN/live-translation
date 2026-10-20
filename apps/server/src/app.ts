@@ -1,6 +1,18 @@
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
-import { mergePage, setEntityStatus, type EntryStatus, type PatchData, type TextRegion, type TranslateEvent } from "@lt/core";
+import {
+  answerCast,
+  castQuestions,
+  mergePage,
+  setEntityStatus,
+  type CastAnswer,
+  type CastQuestion,
+  type EntryStatus,
+  type PatchData,
+  type ReadingPosition,
+  type TextRegion,
+  type TranslateEvent,
+} from "@lt/core";
 import { getPage, listPages, readPageImage } from "./dataset";
 import { env, ROOT } from "./env";
 import { spentUsd } from "./ledger";
@@ -92,6 +104,43 @@ app.post("/api/memory/entity", async (c) => {
   const mem = await serial(`${ns}:${body.seriesId}`, async () => {
     const m = setEntityStatus(await loadMemory(ns, body.seriesId, ""), body.ja, body.status, body.vi);
     await saveMemory(ns, m);
+    return m;
+  });
+  return c.json(mem);
+});
+
+// One-tap cast questions (core/cast.ts): the few uncertain facts that decide pronouns for a series.
+app.get("/api/memory/questions", async (c) => {
+  const { seriesId = "", ns = "demo", chapter = "1", page = "1" } = c.req.query();
+  const mem = await loadMemory(ns, seriesId, "");
+  const pos = { chapter: Number(chapter), page: Number(page) };
+  const lines = [...mem.recent, ...(mem.pending ?? [])];
+  const questions = castQuestions(mem, pos).map((q) => ({
+    ...q,
+    sample: q.evidence.map((e) => lines.find((l) => l.pageId === e.pageId && l.regionId === e.regionId)).filter(Boolean),
+  }));
+  return c.json({ questions });
+});
+
+// The answer is locked into the memory and kept as a labelled example (text only, dev: .private/labels/):
+// what the model had guessed, what the reader chose, and the lines between them. It measures how good
+// the automatic guesses are and, later, improves the defaults. Nothing leaves the machine.
+app.post("/api/memory/answer", async (c) => {
+  const body = await c.req.json<{ ns?: string; seriesId: string; question: CastQuestion; answer: CastAnswer; pos: ReadingPosition }>();
+  const ns = body.ns ?? "demo";
+  const mem = await serial(`${ns}:${body.seriesId}`, async () => {
+    const before = await loadMemory(ns, body.seriesId, "");
+    const m = answerCast(before, body.question, body.answer, body.pos);
+    await saveMemory(ns, m);
+    const names = new Set(body.question.who.map((w) => w.vi));
+    const context = [...before.recent, ...(before.pending ?? [])]
+      .filter((l) => names.has(l.speaker) || (l.to && names.has(l.to)))
+      .slice(-8)
+      .map((l) => ({ id: `${l.pageId}:${l.regionId}`, speaker: l.speaker, to: l.to, ja: l.ja, vi: l.vi }));
+    const dir = join(PRIVATE_DIR, "labels");
+    await mkdir(dir, { recursive: true });
+    const row = { at: new Date().toISOString(), ns, seriesId: body.seriesId, pos: body.pos, question: body.question, answer: body.answer, context };
+    await writeFile(join(dir, "cast-answers.jsonl"), JSON.stringify(row) + "\n", { flag: "a" });
     return m;
   });
   return c.json(mem);

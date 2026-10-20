@@ -356,7 +356,31 @@ export function snapBoxesToPaper(full: RGBAImage, result: Uint8Array, job: Inpai
       for (let y = qy + 1; y < bh && dark(qx, y); y++) b++;
       return Math.max(a, b);
     };
+    // The paper the letters sat on: light pixels joined (4-way) to the light pixels of the core.
+    // A box reaching past a balloon outline into hatching never reaches that paper there.
+    const light = (qx: number, qy: number) => lumXY(crop.x + x0 + qx, crop.y + y0 + qy) >= m - 40;
+    const reach = new Uint8Array(bw * bh);
+    const queue: number[] = [];
+    for (let qy = Math.max(0, Math.ceil(cy0)); qy < Math.min(bh, cy1); qy++)
+      for (let qx = Math.max(0, Math.ceil(cx0)); qx < Math.min(bw, cx1); qx++)
+        if (light(qx, qy)) {
+          reach[qy * bw + qx] = 1;
+          queue.push(qy * bw + qx);
+        }
+    for (let k = 0; k < queue.length; k++) {
+      const q = queue[k];
+      const qx = q % bw, qy = (q - qx) / bw;
+      for (const [nx, ny] of [[qx - 1, qy], [qx + 1, qy], [qx, qy - 1], [qx, qy + 1]]) {
+        if (nx < 0 || ny < 0 || nx >= bw || ny >= bh) continue;
+        const nq = ny * bw + nx;
+        if (reach[nq] || !light(nx, ny)) continue;
+        reach[nq] = 1;
+        queue.push(nq);
+      }
+    }
     const keep = new Uint8Array(bw * bh);
+    // Ink pieces with only that paper around them: the letters (and what the masks left of them).
+    const letters = new Uint8Array(bw * bh);
     const seen = new Uint8Array(bw * bh);
     for (let q0 = 0; q0 < bw * bh; q0++) {
       if (seen[q0] || !dark(q0 % bw, Math.floor(q0 / bw))) continue;
@@ -386,10 +410,29 @@ export function snapBoxesToPaper(full: RGBAImage, result: Uint8Array, job: Inpai
         for (const q of piece) {
           const qx = q % bw, qy = (q - qx) / bw;
           if (!inCore(qx, qy) || run(qx, qy) > long) keep[q] = 1;
+          else letters[q] = 1;
         }
+      else {
+        // Light pixels within 2 px of the piece must all be the letters' paper.
+        let onPaper = false, outside = false;
+        for (const q of piece) {
+          const qx = q % bw, qy = (q - qx) / bw;
+          for (let dy = -2; dy <= 2 && !outside; dy++)
+            for (let dx = -2; dx <= 2 && !outside; dx++) {
+              const nx = qx + dx, ny = qy + dy;
+              if (nx < 0 || ny < 0 || nx >= bw || ny >= bh || !light(nx, ny)) continue;
+              if (reach[ny * bw + nx]) onPaper = true;
+              else outside = true;
+            }
+          if (outside) break;
+        }
+        if (onPaper && !outside) for (const q of piece) letters[q] = 1;
+      }
     }
-    // Antialiased rims of what is kept stay too.
+    // Paint the paper and the letters with their antialiased rims; what is kept shows the source;
+    // anything else (art beyond the outline) keeps the redraw it had.
     const rim = dilate(keep, bw, bh, 1);
+    const around = dilate(letters, bw, bh, 2);
     for (let qy = 0; qy < bh; qy++)
       for (let qx = 0; qx < bw; qx++) {
         const q = qy * bw + qx;
@@ -398,6 +441,9 @@ export function snapBoxesToPaper(full: RGBAImage, result: Uint8Array, job: Inpai
           hole[p] = 0;
           continue;
         }
+        const isLight = light(qx, qy);
+        if (!reach[q] && !letters[q] && !(around[q] && !isLight)) continue;
+        if (isLight && !reach[q]) continue;
         hole[p] = 1;
         result[p] = paper[0];
         result[n + p] = paper[1];
@@ -405,6 +451,29 @@ export function snapBoxesToPaper(full: RGBAImage, result: Uint8Array, job: Inpai
       }
   }
   return { ...job, hole };
+}
+
+/**
+ * A grey manga page stays grey: when the source around the hole has no colour (every channel
+ * within 10 of the others), the reconstruction is turned to its luminance. Small holes in screentone
+ * otherwise came back with blue and red specks.
+ */
+export function keepGrey(full: RGBAImage, result: Uint8Array, job: InpaintJob): void {
+  const { crop } = job;
+  const n = crop.w * crop.h;
+  let coloured = 0, seen = 0;
+  for (let y = crop.y; y < crop.y + crop.h; y += 2)
+    for (let x = crop.x; x < crop.x + crop.w; x += 2) {
+      const i = (y * full.width + x) * 4;
+      const d = full.data;
+      seen++;
+      if (Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2]) > 10) coloured++;
+    }
+  if (!seen || coloured > 0.01 * seen) return;
+  for (let p = 0; p < n; p++) {
+    const v = Math.round(0.299 * result[p] + 0.587 * result[n + p] + 0.114 * result[2 * n + p]);
+    result[p] = result[n + p] = result[2 * n + p] = v;
+  }
 }
 
 /**

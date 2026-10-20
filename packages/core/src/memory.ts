@@ -27,6 +27,22 @@ export interface MemoryEntity {
   speech?: string;
   /** Short relationship facts known so far. */
   relations?: string[];
+  /** How the character is drawn (from a page where they are named and visible), to recognise them later. */
+  looks?: string;
+  /** Gender as drawn, seen on one page: it becomes `gender` only when a second page agrees (one misread face must not pin the pronouns of a whole series). */
+  genderSeen?: { gender: "female" | "male"; pageId: string };
+  /** Set when the reader answered the gender question (never changed by a model). */
+  genderBy?: "reader";
+  /**
+   * Where the character's face is drawn on a page already read (per-mille box). Geometry only: the
+   * reference is cropped again from that page while it is at hand, never stored as an image.
+   */
+  ref?: { pageId: string; box: [number, number, number, number] };
+  /**
+   * Labels this character had before their name was known ("(boy, curly hair)"). A reader's binding
+   * makes lines under the label read as this name; a model's is a suggestion shown on the card.
+   */
+  aliases?: Array<{ label: string; by: "model" | "reader"; pageId?: string }>;
   /** Official romanization from metadata (spelling only). */
   officialName?: string;
   source?: Source;
@@ -47,6 +63,10 @@ export interface MemoryAddress {
   source?: Source;
   /** Times the same pair was observed with these terms. */
   count?: number;
+  /** Pages where the same speaker → listener used other terms: the rule is ambiguous. */
+  conflicts?: number;
+  /** Earlier values when the reader changed the rule. */
+  history?: Array<{ at: string; selfVi?: string; addressVi?: string; status: EntryStatus }>;
 }
 
 export interface RecentLine {
@@ -189,11 +209,50 @@ export interface SeriesMemory {
   pending?: RecentLine[];
   /** Confirmed external metadata; its characters only surface once seen in the story. */
   metadata?: SeriesMetadata;
+  /** Cast questions already put to the reader (cast.ts), so none is asked twice. */
+  asked?: Array<{ id: string; at: ReadingPosition; answer: string }>;
   updatedAt: string;
 }
 
 export function emptyMemory(seriesId: string, title: string): SeriesMemory {
   return { seriesId, title, entities: [], address: [], recent: [], updatedAt: new Date().toISOString() };
+}
+
+/**
+ * A speaker or listener the memory may keep: not "unknown" and not a page-local label for someone
+ * seen but not yet named, such as "(girl, short hair)". Labels help the next pages keep the same
+ * pair of pronouns (recent dialogue) but never become characters or address rules.
+ */
+export const isNamed = (n: string | undefined): n is string => !!n && n !== "unknown" && !/^\(.*\)$/.test(n.trim());
+export const isLabel = (n: string | undefined): n is string => !!n && /^\(.+\)$/.test(n.trim());
+const labelKey = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+
+/** A label bound to a character reads as that character's name; names, "unknown" and unbound labels are returned as given. */
+export function resolveName<T extends string | undefined>(entities: MemoryEntity[], n: T): T | string {
+  if (!isLabel(n)) return n;
+  const k = labelKey(n);
+  const e = entities.find((x) => x.kind === "character" && x.status !== "rejected" && x.aliases?.some((a) => a.by === "reader" && labelKey(a.label) === k));
+  return e ? e.vi : n;
+}
+
+/**
+ * Bind `label` to the character `ja`. The reader's binding takes the label from any other character
+ * and rewrites the lines and rules under it to the name, so the memory and the next prompts speak of
+ * one person. The model's binding is only a suggestion (the guess on the reader's card): applied
+ * directly it named more lines (26% → 41%, 21/10) but tied some labels to the wrong character, and
+ * pronouns got worse. A reader binding is never replaced by a model suggestion.
+ */
+export function bindLabel(mem: SeriesMemory, label: string, ja: string, by: "model" | "reader", pageId?: string): SeriesMemory {
+  const k = labelKey(label);
+  if (by === "model" && mem.entities.some((e) => e.aliases?.some((a) => a.by === "reader" && labelKey(a.label) === k))) return mem;
+  const entities = mem.entities.map((e) => {
+    const rest = (e.aliases ?? []).filter((a) => labelKey(a.label) !== k);
+    if (e.kind === "character" && e.ja === ja) return { ...e, aliases: [...rest, { label, by, ...(pageId && { pageId }) }] };
+    return e.aliases ? { ...e, aliases: rest } : e;
+  });
+  const lines = (ls: RecentLine[]) => ls.map((l) => ({ ...l, speaker: resolveName(entities, l.speaker), to: resolveName(entities, l.to) }));
+  const address = mem.address.map((a) => ({ ...a, from: resolveName(entities, a.from), to: resolveName(entities, a.to) }));
+  return { ...mem, entities, address, recent: lines(mem.recent), ...(mem.pending && { pending: lines(mem.pending) }) };
 }
 
 export const atOrBefore = (a: ReadingPosition, b: ReadingPosition) =>
@@ -243,6 +302,15 @@ export function mergePage(
       if (atOrBefore(pos, existing.knownFrom)) existing.knownFrom = pos;
       if (!existing.lastSeen || atOrBefore(existing.lastSeen, pos)) existing.lastSeen = pos;
       existing.seen = (existing.seen ?? 1) + 1;
+      if (n.face && !existing.ref) existing.ref = { pageId, box: n.face };
+      if (existing.status === "auto") {
+        existing.looks ??= n.looks;
+        if ((!existing.gender || existing.gender === "unknown") && n.gender) {
+          const seen = existing.genderSeen;
+          if (seen && seen.pageId !== pageId && seen.gender === n.gender) existing.gender = n.gender;
+          else if (!seen || seen.pageId !== pageId) existing.genderSeen = { gender: n.gender, pageId };
+        }
+      }
       continue;
     }
     const meta = n.kind === "character" ? matchMetaCharacter(mem.metadata, n.ja) : undefined;
@@ -258,6 +326,9 @@ export function mergePage(
       source: "page",
       lastSeen: pos,
       seen: 1,
+      ...(n.looks && { looks: n.looks }),
+      ...(n.gender && { genderSeen: { gender: n.gender, pageId } }),
+      ...(n.face && { ref: { pageId, box: n.face } }),
       ...(meta && {
         gender: meta.gender === "Female" ? "female" : meta.gender === "Male" ? "male" : undefined,
         role: meta.role?.toLowerCase(),
@@ -271,18 +342,30 @@ export function mergePage(
     proposals.push(entity);
   }
 
-  const address = mem.address.map((a) => ({ ...a, evidence: [...a.evidence] }));
-  for (const a of notes.address) {
+  // A name now given to someone who had a label on earlier pages: their lines and rules read as the name.
+  let bound: SeriesMemory = { ...mem, entities };
+  for (const n of notes.names) {
+    const e = n.kind === "character" && n.was ? bound.entities.find((x) => normalizeKey(x.ja) === normalizeKey(n.ja)) : undefined;
+    if (e && n.was) bound = bindLabel(bound, n.was, e.ja, "model", pageId);
+  }
+  const ents = bound.entities;
+
+  const address = bound.address.map((a) => ({ ...a, evidence: [...a.evidence] }));
+  for (const note of notes.address) {
+    const a = { ...note, from: resolveName(ents, note.from), to: resolveName(ents, note.to) };
+    if (!isNamed(a.from) || !isNamed(a.to)) continue;
     const ev: Evidence = { pageId, regionId: a.evidence, pos };
     const existing = address.find((x) => x.from === a.from && x.to === a.to);
     if (existing) {
-      const same = (!a.self_vi || a.self_vi === existing.selfVi) && (!a.address_vi || a.address_vi === existing.addressVi);
+      const agrees = (x?: string, y?: string) => !x || !y || x === y;
+      const same = agrees(a.self_vi, existing.selfVi) && agrees(a.address_vi, existing.addressVi);
       if (existing.status === "auto") {
         existing.call ??= a.call;
         existing.selfVi ??= a.self_vi;
         existing.addressVi ??= a.address_vi;
       }
       if (same) existing.count = (existing.count ?? 1) + 1;
+      else existing.conflicts = (existing.conflicts ?? 0) + 1;
       existing.evidence = [...existing.evidence.slice(-5), ev];
       continue;
     }
@@ -303,9 +386,9 @@ export function mergePage(
   const lines: RecentLine[] = translations
     .filter((t) => t.role !== "none" && t.role !== "decorative" && (t.ja || t.vi))
     .sort((a, b) => a.seq - b.seq)
-    .map((t) => ({ pageId, regionId: t.id, speaker: t.speaker, to: t.to, ja: t.ja, vi: t.vi, pos }));
-  const recent = [...mem.recent.filter((r) => r.pageId !== pageId), ...lines].slice(-RECENT_LIMIT);
-  const pending = [...(mem.pending ?? []).filter((r) => r.pageId !== pageId), ...lines].slice(-PENDING_LIMIT);
+    .map((t) => ({ pageId, regionId: t.id, speaker: resolveName(ents, t.speaker), to: resolveName(ents, t.to), ja: t.ja, vi: t.vi, pos }));
+  const recent = [...bound.recent.filter((r) => r.pageId !== pageId), ...lines].slice(-RECENT_LIMIT);
+  const pending = [...(bound.pending ?? []).filter((r) => r.pageId !== pageId), ...lines].slice(-PENDING_LIMIT);
 
   const profile =
     mem.profile ??
@@ -313,7 +396,7 @@ export function mergePage(
       ? { genres: notes.series.genres, tone: notes.series.tone, setting: notes.series.setting, source: "page" as const }
       : undefined);
 
-  return { memory: { ...mem, entities, address, recent, pending, profile, updatedAt: now }, proposals };
+  return { memory: { ...mem, entities: ents, address, recent, pending, profile, updatedAt: now }, proposals };
 }
 
 export function setEntityStatus(mem: SeriesMemory, ja: string, status: EntryStatus, vi?: string): SeriesMemory {
@@ -346,7 +429,7 @@ const strings = (xs: unknown, max: number, len: number): string[] =>
 
 /** A clean L1 card: optional fields only when valid, so v3 and v4 cards read alike. */
 function card(text: string, pos: ReadingPosition, evidence: Evidence[], raw: { who?: unknown; importance?: unknown; kind?: unknown; keys?: unknown }): StoryEvent {
-  const who = strings(raw.who, 6, 40).filter((n) => !/^(unknown|không rõ|\?)$/i.test(n));
+  const who = strings(raw.who, 6, 40).filter((n) => isNamed(n) && !/^(không rõ|\?)$/i.test(n));
   const importance = Math.round(Number(raw.importance));
   const kind = (EVENT_KINDS as readonly string[]).includes(String(raw.kind)) ? (raw.kind as EventKind) : undefined;
   const keys = strings(raw.keys, 8, 30);
@@ -400,8 +483,9 @@ export function applyMemoryUpdate(
   }
 
   const address = mem.address.map((a) => ({ ...a }));
-  for (const a of u.address ?? []) {
-    if (!a.from || !a.to || a.from === "unknown" || a.to === "unknown") continue;
+  for (const raw of u.address ?? []) {
+    const a = { ...raw, from: resolveName(mem.entities, raw.from), to: resolveName(mem.entities, raw.to) };
+    if (!isNamed(a.from) || !isNamed(a.to)) continue;
     const ex = address.find((x) => x.from === a.from && x.to === a.to);
     if (ex) {
       if (ex.status === "auto") {
@@ -743,7 +827,7 @@ export interface VolatileOptions {
 export function activeNames(mem: SeriesMemory, pos: ReadingPosition): Set<string> {
   const out = new Set<string>();
   const lines = [...(mem.pending ?? []), ...mem.recent].filter((l) => atOrBefore(l.pos, pos)).slice(-40);
-  for (const l of lines) for (const n of [l.speaker, l.to]) if (n && n !== "unknown") out.add(n);
+  for (const l of lines) for (const n of [l.speaker, l.to]) if (isNamed(n)) out.add(n);
   const records = (mem.archive ?? []).filter((r) => atOrBefore(r.upTo, pos)).slice(-3);
   const text = records.map((r) => r.segment).join(" ");
   for (const e of mem.entities) if (e.kind === "character" && e.vi && text.includes(e.vi)) out.add(e.vi);
@@ -762,7 +846,7 @@ export function recordsUpTo(mem: SeriesMemory, pos: ReadingPosition): SummaryRec
  */
 export function backgroundInput(mem: SeriesMemory, maxCast = 20, maxAddress = 24) {
   const involved = new Set<string>();
-  for (const l of mem.pending ?? []) for (const n of [l.speaker, l.to]) if (n && n !== "unknown") involved.add(n);
+  for (const l of mem.pending ?? []) for (const n of [l.speaker, l.to]) if (isNamed(n)) involved.add(n);
   const chars = mem.entities.filter((e) => e.kind === "character" && e.status !== "rejected");
   const score = (e: MemoryEntity) => (involved.has(e.vi) ? 0 : e.status === "locked" || e.status === "confirmed" ? 1 : 2);
   const cast = [...chars].sort((a, b) => score(a) - score(b) || (b.seen ?? 1) - (a.seen ?? 1)).slice(0, maxCast);
@@ -812,6 +896,8 @@ export function stableContext(mem: SeriesMemory, pos: ReadingPosition, maxTokens
     const bits = [
       e.gender && e.gender !== "unknown" ? e.gender : "",
       e.role ?? "",
+      e.looks ? `looks: ${e.looks}` : "",
+      e.aliases?.some((a) => a.by === "reader") ? `aka ${e.aliases.filter((a) => a.by === "reader").map((a) => a.label).join(", ")}` : "",
       e.speech ? `speech: ${e.speech}` : "",
       e.relations?.length ? `relations: ${e.relations.join("; ")}` : "",
       e.officialName ? `official spelling: ${e.officialName}` : "",
@@ -820,9 +906,12 @@ export function stableContext(mem: SeriesMemory, pos: ReadingPosition, maxTokens
   };
   const cast = known.filter((e) => e.kind === "character");
   const names = new Set(cast.map((e) => e.vi));
+  // Confidence the model can act on: a rule seen on one page or contradicted on another is only a hint.
+  const confidence = (a: MemoryAddress) =>
+    a.status !== "auto" ? "" : a.conflicts ? `, ambiguous: contradicted ${a.conflicts}×` : (a.count ?? 1) < 2 ? ", tentative" : "";
   const addrLine = (a: MemoryAddress) =>
     `- ${a.from} → ${a.to}: ${a.call ? `calls "${a.call}"; ` : ""}self "${a.selfVi ?? "?"}", addresses as "${a.addressVi ?? "?"}"` +
-    ` {${a.status}${a.count && a.count > 1 ? `, seen ${a.count}×` : ""}${names.has(a.from) && names.has(a.to) ? "" : ", partial"}}`;
+    ` {${a.status}${a.count && a.count > 1 ? `, seen ${a.count}×` : ""}${confidence(a)}${names.has(a.from) && names.has(a.to) ? "" : ", partial"}}`;
   const matrix = mem.address.filter((a) => a.status !== "rejected" && atOrBefore(a.knownFrom, pos));
   const recentJa = [...(mem.pending ?? []), ...mem.recent].filter((l) => atOrBefore(l.pos, pos)).map((l) => l.ja).join(" ");
   const terms = known.filter((e) => e.kind !== "character");
@@ -855,7 +944,10 @@ export function stableContext(mem: SeriesMemory, pos: ReadingPosition, maxTokens
   const parts = [...head];
   if (taken.cast.length) parts.push("Cast (reuse the Vietnamese names exactly; locked/confirmed = set by the reader):\n" + taken.cast.join("\n"));
   if (taken.address.length)
-    parts.push("Directed address (speaker → listener; apply only when both are known for a bubble; never reverse automatically):\n" + taken.address.join("\n"));
+    parts.push(
+      "Directed address (speaker → listener; apply only when both are known for a bubble; never reverse automatically; locked/confirmed = the reader's choice, always follow it; tentative or ambiguous = a hint, what the page shows wins):\n" +
+        taken.address.join("\n"),
+    );
   if (taken.terms.length) parts.push("Terms:\n" + taken.terms.join("\n"));
   if (dropped) parts.push(`(${dropped} older entries not shown: not active on recent pages.)`);
   return parts.join("\n\n") || "(empty — no series knowledge yet)";

@@ -57,6 +57,14 @@ export interface NameNote {
   kind: NameKind;
   evidence: string;
   note?: string;
+  /** A character as drawn on this page (gender, age group, hair, clothes), to recognise them on later pages. */
+  looks?: string;
+  /** Only when the art makes it clear. */
+  gender?: "female" | "male";
+  /** Where their face is drawn on this page, per-mille [x0, y0, x1, y1]: geometry only, cropped again when needed. */
+  face?: [number, number, number, number];
+  /** The label this person had on earlier pages before their name was known, e.g. "(boy, curly hair)". */
+  was?: string;
 }
 
 export interface AddressNote {

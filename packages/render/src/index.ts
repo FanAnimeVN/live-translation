@@ -7,6 +7,7 @@ import {
   intersect,
   glyphResidue,
   layoutText,
+  paintBalloon,
   roundBox,
   sampleBorder,
   spansFromMask,
@@ -86,6 +87,8 @@ export interface RegionRender {
   textQuad?: Array<[number, number]>;
   /** Lettered line by line on this many printed lines of the source (a card, a form). */
   printedLines?: number;
+  /** A shout lettered big in capitals: "stacked" letter by letter down its column, or "across". */
+  display?: "stacked" | "across";
 }
 
 /** Reconstructed artwork for one region (from MI-GAN), drawn before lettering. */
@@ -257,6 +260,7 @@ export function renderTranslation(
     const area_ = textArea(r, !!r.bubble && cornersFlat(img, r.bubble));
     // A balloon erased glyph by glyph (no closed interior) only loses ink near its own text boxes.
     const glyphBoxes = r.bubble ? r.members.map((m) => clipTo(expand(m, Math.max(3, 0.25 * (charSize ?? 16))), r.bubble!)) : undefined;
+    const inkBefore = r.bubble ? coreInk(img, area_) : 0;
     const erase = eraseRegion(img, area_, {
       bubble: r.bubble,
       mode: r.bubble ? "auto" : "glyph",
@@ -266,6 +270,19 @@ export function renderTranslation(
     });
     let residue = erase.mode === "skipped" ? Infinity : glyphResidue(img, erase.mode === "glyph" && glyphBoxes ? glyphBoxes : area_, charSize);
     if (residue > MAX_RESIDUE && r.bubble) residue = retouch(img, r, area_, erase.bg, charSize, erase.interior);
+    // Hollow outlined letters crossing a burst's edge join the outline: the fill leaves them all and
+    // the residue test (glyph-shaped ink) can miss thin outlines. Most of a balloon's text ink must be gone.
+    if (r.bubble && inkBefore >= 0.04 && coreInk(img, area_) > 0.5 * inkBefore) residue = Infinity;
+    // Text boxes reaching well out of the balloon (a shout running past a burst's edge into speed
+    // lines): the balloon fill stops at the edge, so the strokes out there are erased like free text
+    // (line work kept). Kept only when that comes out clean: sending the whole balloon to the
+    // inpainting model for a strip brings back ghosts of every glyph.
+    const outside = r.bubble ? stripsOutside(area_, r.bubble) : [];
+    if (outside.length && residue <= MAX_RESIDUE) {
+      const before = outside.map((s) => snapshot(img, s));
+      const strip = eraseRegion(img, outside, { mode: "glyph", maxMid: MAX_MID_FREE, charSize });
+      if (strip.mode === "skipped" || glyphResidue(img, outside, charSize) > MAX_RESIDUE) for (const s of before) restore(img, s);
+    }
     if (erase.mode === "skipped" && residue > MAX_RESIDUE) {
       restore(img, snap);
       out.push({ id: r.id, status: "needs-inpaint", needsInpaint: true, erase });
@@ -314,16 +331,24 @@ export function renderTranslation(
   // 3) Areas: the real balloon interior, or free space that avoids every other region.
   //    `hard` is lettering already placed that free text must stay clear of (step 5).
   const fontFor = (px: number, bold: boolean) => `${bold ? "bold " : ""}${px}px ${family}`;
+  const glyphSize = (job: Job) => Math.sqrt(area(job.r.box) / ([...job.t.ja.replace(/\s/g, "")].length || 4));
+  const glyphSizes = jobs.map(glyphSize).sort((a, b) => a - b);
+  const typicalGlyph = glyphSizes.length ? glyphSizes[Math.floor(glyphSizes.length / 2)] : 0;
   const planFor = (job: Job, hard: Box[] = [], cap = 34): Plan => {
     const others = regions.filter((o) => o.id !== job.r.id).map((o) => o.bubble ?? o.box);
     const { area: box, rotated } = letteringArea(img, job, size, others, hard);
-    const jaChars = [...job.t.ja.replace(/\s/g, "")].length || 4;
-    const charSize = Math.sqrt(area(job.r.box) / jaChars);
+    const charSize = glyphSize(job);
     const bold = job.t.style.includes("shout");
     const measure = (text: string, px: number) => {
       ctx.font = fontFor(px, bold);
       return ctx.measureText(text).width;
     };
+    // A shout drawn big (or one or two words marked as shouting): lettered like the raw, see displayPlan.
+    const display = displayPlan(img, job, box, charSize, typicalGlyph, (text, px) => {
+      ctx.font = fontFor(px, true);
+      return ctx.measureText(text).width;
+    });
+    if (display) return { ...job, ...display, bold: true, angle: undefined, centre: undefined, arc: undefined, doc: undefined };
     const maxSize = Math.min(cap, Math.max(13, Math.min(34, Math.round(charSize * 0.95))));
     // Free text that sits at an angle or along a curve in the raw is lettered the same way.
     const slanted = job.slant && planSlanted(job.slant, job.t.vi, measure, maxSize);
@@ -391,7 +416,7 @@ export function renderTranslation(
   const median = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0;
   const cap = Math.max(14, Math.round(median * 1.25));
   for (const p of plans) {
-    if (sizes.length >= 3 && p.layout.fontSize > cap && p.arc === undefined && !p.doc) p.layout = layoutText(p.t.vi, p.frame, p.measure, { maxSize: cap, minSize: 9 });
+    if (sizes.length >= 3 && p.layout.fontSize > cap && p.arc === undefined && !p.doc && !p.display) p.layout = layoutText(p.t.vi, p.frame, p.measure, { maxSize: cap, minSize: 9 });
   }
 
   // 5) Lettering never overlaps. Free text grows into free paper and so does its neighbour,
@@ -489,6 +514,7 @@ export function renderTranslation(
       curved: p.arc !== undefined || undefined,
       textQuad: quadOf(p),
       printedLines: p.doc?.length,
+      display: p.display ? (p.layout.lines.length > 1 && p.layout.lines.every((l) => [...l.text].length === 1) ? "stacked" : "across") : undefined,
     });
   }
   return out;
@@ -640,11 +666,48 @@ function retouchGlyphs(img: RGBAImage, area_: Box[], bg: [number, number, number
 }
 
 /** Both retouch passes, ink blobs first; the residue left (Infinity when neither could run). */
+/**
+ * Parts of the text boxes beyond the balloon box: above, below, left and right of it, kept only when
+ * they are a real stretch of text (at least 8% of the box and 6 px), not a loose box's margin.
+ */
+function stripsOutside(boxes: Box[], b: Box): Box[] {
+  const out: Box[] = [];
+  for (const m of boxes) {
+    const y0 = Math.max(m.y, b.y), y1 = Math.min(m.y + m.h, b.y + b.h);
+    const keep = (s: Box, along: number) => s.w > 0 && s.h > 0 && Math.min(s.w, s.h) >= Math.max(6, 0.08 * along) && out.push(s);
+    keep({ x: m.x, y: m.y, w: m.w, h: b.y - m.y }, m.h);
+    keep({ x: m.x, y: b.y + b.h, w: m.w, h: m.y + m.h - (b.y + b.h) }, m.h);
+    if (y1 > y0) {
+      keep({ x: m.x, y: y0, w: b.x - m.x, h: y1 - y0 }, m.w);
+      keep({ x: b.x + b.w, y: y0, w: m.x + m.w - (b.x + b.w), h: y1 - y0 }, m.w);
+    }
+  }
+  return out;
+}
+
+/** Share of dark pixels in the cores of the text boxes (outer 15% left out: a small balloon's outline runs there). */
+function coreInk(img: RGBAImage, boxes: Box[]): number {
+  let dark = 0;
+  let all = 0;
+  for (const b of boxes) {
+    const c = roundBox(clampBox({ x: b.x + 0.15 * b.w, y: b.y + 0.15 * b.h, w: 0.7 * b.w, h: 0.7 * b.h }, img.width, img.height));
+    for (let y = c.y; y < c.y + c.h; y++)
+      for (let x = c.x; x < c.x + c.w; x++) {
+        const i = (y * img.width + x) * 4;
+        all++;
+        if (0.299 * img.data[i] + 0.587 * img.data[i + 1] + 0.114 * img.data[i + 2] < 110) dark++;
+      }
+  }
+  return all ? dark / all : 0;
+}
+
 function retouch(img: RGBAImage, r: TextRegion, area_: Box[], bg: [number, number, number], charSize?: number, interior?: InteriorMask): number {
   const first = retouchBalloon(img, r.members, area_, bg, charSize, interior);
   if (first <= MAX_RESIDUE) return first;
   const second = retouchGlyphs(img, area_, bg, charSize, interior);
-  return Math.min(first, second);
+  if (Math.min(first, second) <= MAX_RESIDUE || !r.bubble) return Math.min(first, second);
+  // Strokes joined to the outline: repaint the balloon's whole inside, outline kept.
+  return paintBalloon(img, r.bubble, area_, bg, charSize, interior) ? glyphResidue(img, area_, charSize) : Math.min(first, second);
 }
 
 /**
@@ -947,7 +1010,96 @@ type Plan = Job & {
   centre: [number, number] | undefined;
   arc: number | undefined;
   doc: DocLine[] | undefined;
+  /** A shout lettered big, in capitals (displayPlan). */
+  display?: boolean;
 };
+
+/** Source glyphs at least this many times the page's usual size are display lettering (see displayPlan). */
+const DISPLAY_GLYPHS = 2;
+
+/**
+ * A shout is lettered as the raw draws it. Japanese has no capitals: a scream is drawn with
+ * glyphs two or three times the dialogue size, often down a tall column of its own. The
+ * Vietnamese keeps that: capitals, bold, sized from the source glyphs (not the page's dialogue
+ * size), filling the place the Japanese took. One short word in a tall column is stacked letter
+ * by letter like the raw (a stretched sound keeps at most three repeats then, so the letters stay
+ * big); anything else is one or two big lines across. Nothing is turned on its side.
+ *
+ * Only short text (one or two words) that the reader model marked as a shout and that is drawn
+ * bigger than the page's usual text, or a short word drawn at twice the usual size; ordinary lines
+ * (a relieved "thank goodness!") keep their case and size.
+ */
+function displayPlan(
+  img: RGBAImage,
+  job: Job,
+  box: LayoutArea,
+  charSize: number,
+  typicalGlyph: number,
+  measure: (text: string, px: number) => number,
+): Pick<Plan, "box" | "frame" | "rotated" | "measure" | "maxSize" | "layout" | "display"> | undefined {
+  const vi = job.t.vi.trim().normalize("NFC");
+  const words = vi.split(/\s+/).length;
+  const letters = vi.replace(/[^\p{L}\p{N}]/gu, "").length;
+  // Size alone is weak evidence (a loose box around one or two kana looks big): without the model's
+  // "shout" it takes glyphs twice the usual size and a short word.
+  const big = typicalGlyph > 0 && charSize >= DISPLAY_GLYPHS * typicalGlyph && letters <= 8;
+  const shout = job.t.style.includes("shout") && charSize >= 1.3 * typicalGlyph;
+  if (words > 2 || letters > 14 || charSize < 30 || !(big || shout)) return undefined;
+  const text = vi.toLocaleUpperCase("vi");
+  const src = job.seed ?? job.r.box;
+  // Big letters go where the paper is clean: a stroke the erase could not take (a hollow glyph
+  // joined to a burst's edge) must not end up under a capital.
+  const room = cleanRows(img, intersect(src, box) ?? src);
+  if (!room) return undefined;
+  const rect: LayoutArea = { x: room.x, y: room.y, w: room.w, h: room.h, shape: "rect" };
+  const cap = Math.min(110, Math.round(0.9 * charSize));
+  const base = { box: rect, measure, maxSize: cap, display: true as const };
+  const across = layoutText(text, rect, measure, { maxSize: cap, minSize: 12 });
+  // Never turned on its side: a reader tilts the head for that. Upright letters stacked down a
+  // tall column read like the raw, but only for one short word (UWA!, HỪ?, KHÔNGGG!): a name or a
+  // phrase stacked letter by letter (H-A-M-C-H-A-N) is hard to read, so it goes across in capitals.
+  const word = text.replace(/(\p{L})\1{3,}/gu, "$1$1$1");
+  const plain = words === 1 && /^[\p{L}]+[!?.…~]*$/u.test(word) && word.replace(/[^\p{L}]/gu, "").length <= 7;
+  if (plain && rect.h >= 1.8 * rect.w) {
+    const stacked = stackLetters(word, rect, measure, cap);
+    if (stacked && stacked.fontSize >= Math.max(18, 0.8 * across.fontSize)) return { ...base, frame: rect, rotated: false, layout: stacked };
+  }
+  return across.overflow ? undefined : { ...base, frame: rect, rotated: false, layout: across };
+}
+
+/** The longest run of rows of `r` with almost no ink across its middle 80%, if it keeps half of `r`. */
+function cleanRows(img: RGBAImage, r: Box): Box | undefined {
+  const b = roundBox(clampBox(r, img.width, img.height));
+  const x0 = Math.round(b.x + 0.1 * b.w), x1 = Math.round(b.x + 0.9 * b.w);
+  let best = { y: b.y, h: 0 };
+  let start = b.y;
+  for (let y = b.y; y <= b.y + b.h; y++) {
+    let dark = 0;
+    if (y < b.y + b.h)
+      for (let x = x0; x < x1; x++) {
+        const i = (y * img.width + x) * 4;
+        if (0.299 * img.data[i] + 0.587 * img.data[i + 1] + 0.114 * img.data[i + 2] < 110) dark++;
+      }
+    if (y === b.y + b.h || dark > 0.06 * (x1 - x0)) {
+      if (y - start > best.h) best = { y: start, h: y - start };
+      start = y + 1;
+    }
+  }
+  return best.h >= 0.5 * b.h ? { x: b.x, y: best.y, w: b.w, h: best.h } : undefined;
+}
+
+/** Capitals stacked one per line down a column, centred, as big as the column allows. */
+function stackLetters(text: string, r: LayoutArea, measure: (text: string, px: number) => number, cap: number): TextLayout | undefined {
+  const chars = [...text.replace(/\s+/g, "")];
+  if (chars.length < 2) return undefined;
+  const step = 1.04;
+  let size = Math.min(cap, Math.floor((r.h * 0.96) / (chars.length * step)));
+  while (size >= 12 && Math.max(...chars.map((c) => measure(c, size))) > r.w * 0.92) size--;
+  if (size < 12) return undefined;
+  const lh = size * step;
+  const top0 = r.y + (r.h - chars.length * lh) / 2;
+  return { fontSize: size, lineHeight: lh, overflow: false, lines: chars.map((c, i) => ({ text: c, cx: r.x + r.w / 2, top: top0 + i * lh, width: measure(c, size) })) };
+}
 
 /** One lettered line of a card, form or letter, in its frame (top-left origin, `y` = middle). */
 interface DocLine {

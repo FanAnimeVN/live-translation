@@ -1,5 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { findGutters, type EntryStatus, type Gutter, type PageResult, type RecallNote, type RegionTranslation, type SeriesMemory, type TextRegion } from "@lt/core";
+import {
+  findGutters,
+  PAIR_PRESETS,
+  presetLabel,
+  presetShort,
+  type CastAnswer,
+  type CastQuestion,
+  type EntryStatus,
+  type Gutter,
+  type PageResult,
+  type PairPreset,
+  type RecallNote,
+  type RegionTranslation,
+  type SeriesMemory,
+  type TextRegion,
+} from "@lt/core";
 import { drawNotes, LETTERING_FONT, placeNotes, renderTranslation, type Ctx2D, type NotePlacement, type PatchImage, type RegionRender } from "@lt/render";
 import { api, translateStream, type ModelInfo, type PageInfo } from "./api";
 
@@ -63,6 +78,8 @@ export function App() {
   // Translate the next pages ahead of the reader. Opt-in: it spends credits on pages not opened yet.
   const [prefetchOn, setPrefetchOn] = useState(false);
   const [psMode, setPsMode] = useState<PsMode>("subtle");
+  // One-tap cast questions for the uncertain facts that decide pronouns (answers are locked).
+  const [questions, setQuestions] = useState<Array<CastQuestion & { sample: Array<{ speaker: string; to?: string; ja: string; vi: string }> }>>([]);
   const requested = useRef(new Set<string>());
   const inflight = useRef(new Set<string>());
 
@@ -240,6 +257,17 @@ export function App() {
     setMemory(await api.setEntity({ ns: NS, seriesId: page.seriesId, ja, status, vi }));
   };
 
+  // Questions follow the memory: a new page read, an answer given or a name confirmed can change them.
+  useEffect(() => {
+    if (!page || !memory) return;
+    void api.questions(page.seriesId, NS, page.position).then((r) => setQuestions(r.questions));
+  }, [page?.id, memory?.updatedAt]);
+
+  const answer = async (q: CastQuestion, a: CastAnswer) => {
+    if (!page) return;
+    setMemory(await api.answer({ ns: NS, seriesId: page.seriesId, question: q, answer: a, pos: page.position }));
+  };
+
   return (
     <div className="app">
       <header>
@@ -400,6 +428,71 @@ export function App() {
               Chỉ gồm những gì đã đọc tới trang hiện tại. Tên AI đề xuất cần bạn xác nhận; tên đã khóa luôn được ưu tiên.
             </p>
             {series.entities.length === 0 && <p className="hint">Chưa có gì — dịch một trang để bắt đầu.</p>}
+            {questions.length > 0 && <h5>Ai là ai? (chạm một lần, áp dụng cho cả bộ)</h5>}
+            {questions.map((q) => {
+              const [a, b] = q.who.map((w) => w.vi);
+              const guess = q.guess && q.kind === "gender" ? (q.guess === "male" ? "nam" : "nữ") : q.guess;
+              return (
+                <div key={q.id} className="entity cast-question">
+                  <div>
+                    {q.kind === "who" ? (
+                      <b>Nhân vật AI đang gọi là “{a}” là ai?</b>
+                    ) : q.kind === "gender" ? (
+                      <b>{a} là nam hay nữ?</b>
+                    ) : (
+                      <b>
+                        {a} và {b} xưng hô với nhau thế nào?
+                      </b>
+                    )}{" "}
+                    <small>
+                      ({q.lines} câu{guess ? ` · AI đoán: ${guess in PAIR_PRESETS ? presetLabel(guess as PairPreset, a, b) : guess}` : " · AI chưa đoán được"})
+                    </small>
+                    {q.sample.map((l, i) => (
+                      <div key={i} className="recent">
+                        [{l.speaker}
+                        {l.to && l.to !== "unknown" ? ` → ${l.to}` : ""}] {l.ja} — {l.vi}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="actions">
+                    {q.kind === "who" ? (
+                      <>
+                        {series.entities
+                          .filter((e) => e.kind === "character" && e.status !== "rejected")
+                          .sort((x, y) => Number(y.vi === q.guess) - Number(x.vi === q.guess) || (y.seen ?? 1) - (x.seen ?? 1))
+                          .slice(0, 6)
+                          .map((e) => (
+                            <button key={e.ja} onClick={() => answer(q, `name:${e.ja}`)}>
+                              {e.vi}
+                            </button>
+                          ))}
+                        <button
+                          onClick={() => {
+                            const v = prompt(`Tên của nhân vật “${a}”:`);
+                            if (v?.trim()) void answer(q, `new:${v.trim()}`);
+                          }}
+                        >
+                          Nhập tên…
+                        </button>
+                      </>
+                    ) : q.kind === "gender" ? (
+                      <>
+                        <button onClick={() => answer(q, "male")}>Nam</button>
+                        <button onClick={() => answer(q, "female")}>Nữ</button>
+                      </>
+                    ) : (
+                      (["anh-em", "em-anh", "chi-em", "em-chi", "to-cau", "tao-may", "con-bo", "con-me", "bo-con", "me-con"] as PairPreset[]).map((p) => (
+                        <button key={p} title={presetLabel(p, a, b)} onClick={() => answer(q, p)}>
+                          {presetShort(p, a, b)}
+                        </button>
+                      ))
+                    )}
+                    <button onClick={() => answer(q, "unknown")}>Không rõ</button>
+                    <button onClick={() => answer(q, "later")}>Để sau</button>
+                  </div>
+                </div>
+              );
+            })}
             {series.entities.map((e) => (
               <div key={e.ja} className={`entity ${e.status}`}>
                 <div>
@@ -437,7 +530,10 @@ export function App() {
             {series.address.length > 0 && <h5>Xưng hô theo chiều</h5>}
             {series.address.map((a, i) => (
               <div key={i} className="addr">
-                {a.from} → {a.to}: gọi “{a.call ?? "?"}” · tự xưng “{a.selfVi ?? "?"}” · gọi người kia “{a.addressVi ?? "?"}”
+                {a.from} → {a.to}: gọi “{a.call ?? "?"}” · tự xưng “{a.selfVi ?? "?"}” · gọi người kia “{a.addressVi ?? "?"}”{" "}
+                <span className="badge">
+                  {a.status !== "auto" ? "bạn đã chốt" : a.conflicts ? `mơ hồ (${a.conflicts} trang khác)` : (a.count ?? 1) < 2 ? "AI đoán (1 trang)" : `khá chắc (${a.count} trang)`}
+                </span>
               </div>
             ))}
             {series.recent.length > 0 && (

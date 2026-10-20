@@ -121,3 +121,45 @@ QA dàn chữ sau vòng này (60 trang, auto + big-lama, `INPAINT_DEVICE=dml`, m
 | Sót nét / chưa vẽ lại / tràn / chạm nhau | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
 | Chữ đè lên chữ giữ làm tranh | 0 | 3 (dòng phụ đề dưới logo: khung logo trùm cả dòng phụ đề) |
 | Chữ ra ngoài bóng | 0 (trước vòng này 4) | 1 (trước 6) |
+
+### Vòng 4 (20/10 tối): detector thứ hai, bóng nhỏ bị bỏ sót, tiếng hét
+
+- **comic-text-detector làm detector thứ hai** (ONNX bản manga-image-translator phát hành, GPL-3.0, học trên Manga109-s), chạy song song với detector chính:
+  - Khối chữ (độ tin ≥ 0,4) mà detector chính không phủ thì thêm vào. Khối nằm trên một ô chữ yếu của detector chính thì xác nhận ô đó.
+  - 60 trang: tìm lại 17/32 ô chữ bị sót. Dịch lại bằng DeepSeek: **đã dịch 95,2% → 96,4%, bỏ sót 33 → 20 ô**.
+  - Có GPU thì thêm ~0,1 s/trang; chỉ có CPU thì thêm 1,6 s/trang nên mặc định tắt. Bóng đầu không chậm hơn (trung vị 3,47 s so với 3,39 s).
+  - Gói cloud trả phí phải đặt `DETECT_CTD=0` vì giấy phép dữ liệu học.
+- **Bóng nhỏ trên nền tram/gạch bị vẽ lại thành vệt.**
+  - Detector chính chỉ cho các bóng này điểm 0,04–0,15 (dưới ngưỡng 0,2), nên chúng thành "chữ tự do" và bị model vẽ lại, kéo tram vào lòng bóng trắng.
+  - Giờ ảnh tự quyết (`findBalloon`): chữ nằm trong một vùng giấy sáng khép kín, viền trơn, ôm sát chữ, bên trong không có gì ngoài chữ. Phải có thêm một trong hai: detector chính "hơi thấy" bóng ở đó (≥ 0,035, IoU ≥ 0,6), hoặc viền rất tròn.
+  - Không áp dụng cho: khung chữ do model báo bỏ sót (khung lỏng), vùng có đường kẻ chạy ngang chữ (bảng, biểu mẫu), vùng lớn hơn 10% trang mà detector không chắc, dải hẹp (cột chú thích).
+  - Bản đầu nhận nhầm cả ô tranh làm bóng, nhóm phát hiện khi xem tận mắt và đã loại. Bản cuối nhận 20/320 vùng chữ tự do; xem từng vùng, tất cả là bóng thoại, khung chú thích hoặc tờ giấy.
+- **Nét chữ chạm viền bóng** (bóng nhỏ đầy chữ đậm, tiếng hét trong bóng gai): loang không tới được các nét này. `paintBalloon` tô lại cả hình lòng bóng và giữ viền:
+  - bóng nhỏ: lấy bao lồi của phần giấy giữa các chữ;
+  - bóng lớn: bắn tia từ giữa chữ ra viền.
+  - Từ chối khi bóng hở hoặc bên trong có tranh.
+- **Tiếng hét chữ to** (như raw vẽ): viết hoa, đậm, cỡ theo chữ gốc.
+  - Một từ ngắn trong cột cao thì xếp dọc từng chữ cái, mỗi chữ đứng thẳng. **Không xoay 90°**: nhóm đánh giá chữ xoay ngang trong bóng là lỗi.
+  - Chỉ áp dụng khi model đánh dấu "shout" và chữ gốc to hơn chữ thường của trang ≥ 1,3 lần, hoặc chữ to gấp đôi và từ dài ≤ 8 chữ cái. Câu thường ("May quá!") giữ nguyên.
+- **Chặn chữ Việt đè lên chữ Nhật chưa xóa.** Chữ rỗng có viền vắt qua mép bóng gai làm phép đo sót nét bị lừa (ARMS-006 r6).
+  - Giờ trong bóng: nếu xóa xong mà phần lõi khung chữ còn hơn nửa lượng mực ban đầu thì vùng đó chờ vẽ lại, không dàn chữ.
+
+QA dàn chữ 60 trang (DeepSeek ds-ctd2, chỉ MI-GAN vì máy thiếu RAM, chạy 6 đợt):
+
+| | Trước vòng này | Sau |
+|---|---|---|
+| Vùng có chữ Việt | 991 | 992 |
+| Sót nét / tràn / chạm nhau | 3 / 0 / 0 | 4 / 0 / 0 |
+| Chữ đè lên chữ giữ làm tranh / chữ ra ngoài bóng | 2 / 1 | 2 / 1 |
+
+- Vùng sót nét thêm (AisazuNihaIrarenai-009 r27, chấm furigana) giống hệt ảnh trước vòng này; trang đó lần trước chạy lỗi RAM nên chưa được đếm.
+- **Phần khung chữ thò ra ngoài bóng** (tiếng hét chạy qua mép bóng gai): xóa nét chữ ở đó như chữ tự do, giữ nét tốc độ và mép gai.
+  - Chỉ giữ kết quả khi phần đó sạch hẳn. Nếu gửi cả bóng cho model vẽ lại chỉ vì một dải nhỏ, các nét chữ cũ hiện lại như bóng ma (đã thử và loại).
+  - Chữ hét viết hoa chỉ đặt vào phần cột sạch; cột không sạch thì dàn chữ bình thường.
+  - QA 60 trang sau thay đổi: các số trong bảng trên giữ nguyên.
+- **Còn lại:**
+  - Tiếng hét ARMS-005 r1: chữ あ rỗng có viền dính vào mép bóng gai, phía dưới mở ra giấy trắng có nét tốc độ. Luật hiện tại không tách được chữ khỏi mép gai.
+    - Cách đúng là mặt nạ chữ học máy, như manga-image-translator: mặt nạ đánh dấu điểm ảnh chữ, rồi tô lại.
+    - comic-text-detector không dùng được cho gói trả phí. comic-text-mask cần kiểm giấy phép trước.
+  - Vài vùng nhỏ trên nền tối còn vệt xám (MI-GAN).
+  - 77% câu thoại chưa rõ người nói.

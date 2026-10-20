@@ -56,6 +56,24 @@ export async function regionCrops(page: DecodedPage, regions: TextRegion[], ids?
   return out;
 }
 
+/**
+ * A small face reference from a page already read: per-mille box plus a margin, at most `maxSide`
+ * pixels (~25 image tokens on Claude). Made in memory each time it is needed, never stored.
+ */
+export async function faceCrop(page: DecodedPage, box: [number, number, number, number], maxSide = 128): Promise<string> {
+  const [x0, x1] = [box[0], box[2]].map((v) => (v / 1000) * page.w);
+  const [y0, y1] = [box[1], box[3]].map((v) => (v / 1000) * page.h);
+  const mx = 0.15 * (x1 - x0), my = 0.15 * (y1 - y0);
+  const x = Math.max(0, Math.floor(x0 - mx)), y = Math.max(0, Math.floor(y0 - my));
+  const w = Math.max(1, Math.min(page.w - x, Math.ceil(x1 - x0 + 2 * mx))), h = Math.max(1, Math.min(page.h - y, Math.ceil(y1 - y0 + 2 * my)));
+  const s = Math.min(2, maxSide / Math.max(w, h));
+  const canvas = createCanvas(Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s)));
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(page.canvas, x, y, w, h, 0, 0, canvas.width, canvas.height);
+  return toDataUrl(canvas);
+}
+
 async function toDataUrl(canvas: Canvas): Promise<string> {
   const jpeg = await canvas.encode("jpeg", 90);
   return `data:image/jpeg;base64,${jpeg.toString("base64")}`;

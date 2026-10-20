@@ -5,7 +5,7 @@
  * .private/eval/<run>/; page results in .private/eval/<run>-k<K>/<model>/ (score-run.ts works on them).
  *
  *   npx tsx tools/eval/src/recall-k.ts [--run recall-k] [--k 0,10,20,40,80] [--sets local,set1]
- *        [--model anthropic/claude-haiku-5.5] [--cap 0.6] [--judge deepseek/deepseek-v4.1-flash-1017] [--score-only] [--books Uchi]
+ *        [--model anthropic/claude-haiku-5.5] [--cap 0.6] [--judge deepseek/deepseek-v4.1-flash-1017] [--score-only] [--books Uchi] [--refs]
  *
  * Within a series the K configurations are interleaved page by page (order rotated), so
  * network conditions are shared; series run in parallel. Resumable: a page whose result
@@ -39,6 +39,8 @@ const model = arg("model", "anthropic/claude-haiku-5.5");
 const cap = Number(arg("cap", "0.6"));
 const judgeModel = arg("judge", "");
 const scoreOnly = process.argv.includes("--score-only");
+// --refs: show the faces of the characters in the scene, cropped from pages already read (the memory keeps the box only).
+const refs = process.argv.includes("--refs");
 const safe = (s: string) => s.replace(/[^a-zA-Z0-9._-]/g, "_");
 const out = join(PRIVATE_DIR, "eval", run);
 const pageDir = (k: number) => join(PRIVATE_DIR, "eval", `${run}-k${k}`, safe(model));
@@ -105,7 +107,17 @@ async function readSeries(key: string, list: DatasetPage[]) {
       try {
         result = await translatePage(
           { id: page.id, title: page.title, seriesId: page.seriesId, position: page.position, bytes: await readPageImage(page) },
-          { model, memory: mem, context: ctx },
+          {
+            model,
+            memory: mem,
+            context: ctx,
+            ...(refs && {
+              refImage: async (id: string) => {
+                const p = pages.find((x) => x.id === id);
+                return p ? readPageImage(p) : undefined;
+              },
+            }),
+          },
         );
       } catch (e) {
         console.log(`${page.id} K=${k} ERROR ${(e as Error).message}`);

@@ -52,10 +52,11 @@ describe("findGutters", () => {
   });
 });
 
-describe("prompt v4 recall", () => {
-  it("asks for an optional recall request in the notes line", () => {
-    expect(PROMPT_VERSION).toBe("vlm-ja-vi-v4");
+describe("prompt v5 recall and speakers", () => {
+  it("asks for an optional recall request in the notes line, and labels for people not yet named", () => {
+    expect(PROMPT_VERSION).toBe("vlm-ja-vi-v5");
     expect(SYSTEM_PROMPT).toContain('"recall":{"regions"');
+    expect(SYSTEM_PROMPT).toContain('"(girl, short hair)"');
   });
 
   it("parses recall and ps, and ignores malformed ones without losing the notes", () => {

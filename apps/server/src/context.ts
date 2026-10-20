@@ -218,7 +218,7 @@ export async function bootstrapFromMetadata(mem: SeriesMemory, id: number): Prom
 const UPDATE_SYSTEM = `You maintain a spoiler-safe story memory for a manga being translated from Japanese to Vietnamese.
 You receive the current memory and NEW dialogue the reader has just read: ja = source, vi = draft translation, speaker→listener when known, ids PAGE:REGION.
 Update the memory ONLY from what these lines and the existing memory establish. A question is not a fact, a request is not a completed action, a worry is not an event. Never guess future events, identities, genders or relationships: unknown stays unknown.
-- Attribute a line or an action to a character only when its speaker field names them; lines from "unknown" stay unattributed ("someone says…").
+- Attribute a line or an action to a character only when its speaker field names them; lines from "unknown" stay unattributed ("someone says…"). A speaker in parentheses, e.g. (girl, short hair), is someone not yet named: describe them that way in the segment and events, never as a named character, a character card, a relation or an address rule.
 - Characters: only those who speak or are named in the NEW dialogue; never add genders, ages or relations the lines do not show (keep what the memory already has).
 - Self-pronouns (俺, 私, あたし, ボク) describe the speaker's style, they are not how the speaker calls someone.
 - Keep the direction of relations: "A is B's owner" is not "B is A's owner".

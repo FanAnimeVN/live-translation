@@ -5,6 +5,8 @@ import {
   backgroundInput,
   emptyMemory,
   estimateTokens,
+  isNamed,
+  parseNotesObject,
   makeDigest,
   makeOverview,
   MEMORY_BUDGET,
@@ -99,6 +101,45 @@ describe("context v2", () => {
     );
     expect(mem.address).toHaveLength(1);
     expect(mem.address[0]).toMatchObject({ from: "Nana", to: "Owner", addressVi: "chủ nhân", source: "summary" });
+  });
+
+  it("remembers how a named character is drawn, without overriding the reader", () => {
+    let mem = emptyMemory("s", "S");
+    const names = [{ ja: "ナナ", vi: "Nana", kind: "character" as const, evidence: "r1", looks: "young girl, twin tails", gender: "female" as const, face: [100, 200, 180, 300] as [number, number, number, number] }];
+    mem = mergePage(mem, "p1", pos(1, 1), notes({ names }), [line("r1", "ナナだよ", "Là Nana nè")]).memory;
+    expect(mem.entities[0]).toMatchObject({ looks: "young girl, twin tails", ref: { pageId: "p1", box: [100, 200, 180, 300] } });
+    const parsed = parseNotesObject({ type: "notes", names: [{ ...names[0], face: [100, 200, 105, 300] }, { ...names[0], ja: "トラ", face: [0, 0, 50, 2000] }, { ...names[0], ja: "ミケ", looks: "(girl, short hair)" }] });
+    expect(parsed?.names.map((n) => [n.face, n.looks])).toEqual([[undefined, "young girl, twin tails"], [undefined, "young girl, twin tails"], [[100, 200, 180, 300], undefined]]);
+    expect(mem.entities[0].gender).toBeUndefined(); // one page is not enough
+    expect(stableContext(mem, pos(1, 2))).toContain("looks: young girl, twin tails");
+    mem = mergePage(mem, "p1", pos(1, 1), notes({ names }), []).memory; // the same page again does not count
+    expect(mem.entities[0].gender).toBeUndefined();
+    mem = mergePage(mem, "p2", pos(1, 2), notes({ names: [{ ...names[0], gender: "male" }] }), []).memory; // disagreement
+    expect(mem.entities[0].gender).toBeUndefined();
+    mem = mergePage(mem, "p3", pos(1, 3), notes({ names: [{ ...names[0], gender: "male" }] }), []).memory;
+    expect(mem.entities[0].gender).toBe("male");
+    mem = setEntityStatus(mem, "ナナ", "locked");
+    mem.entities[0].gender = "female";
+    mem = mergePage(mem, "p4", pos(1, 4), notes({ names: [{ ...names[0], looks: "boy", gender: "male" }] }), []).memory;
+    mem = mergePage(mem, "p5", pos(1, 5), notes({ names: [{ ...names[0], looks: "boy", gender: "male" }] }), []).memory;
+    expect(mem.entities[0]).toMatchObject({ looks: "young girl, twin tails", gender: "female" });
+  });
+
+  it("keeps labels for people not yet named out of address rules, but in recent dialogue", () => {
+    let mem = emptyMemory("s", "S");
+    const label = "(girl, short hair)";
+    mem = mergePage(
+      mem,
+      "p1",
+      pos(1, 1),
+      notes({ address: [{ from: label, to: "Owner", self_vi: "em", address_vi: "anh", evidence: "r2" }] }),
+      [line("r2", "待って！", "Đợi em với!", label, "Owner")],
+    ).memory;
+    mem = applyMemoryUpdate(mem, { address: [{ from: label, to: "Owner", self_vi: "em", address_vi: "anh", evidence: ["p1:r2"] }] }, pos(1, 1), "m");
+    expect(isNamed(label)).toBe(false);
+    expect(isNamed("Owner")).toBe(true);
+    expect(mem.address).toHaveLength(0);
+    expect(volatileContext(mem, pos(1, 2))).toContain(label);
   });
 
   it("archives every summary and shows the story as it stood at the reading position", () => {

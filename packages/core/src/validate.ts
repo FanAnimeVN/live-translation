@@ -19,7 +19,9 @@ const NAME_KINDS: NameKind[] = ["character", "place", "org", "term", "other"];
 const NotesLine = z.object({
   type: z.literal("notes"),
   names: z
-    .array(z.object({ ja: str, vi: str, kind: str.optional(), evidence: str.optional(), note: str.optional() }))
+    .array(
+      z.object({ ja: str, vi: str, kind: str.optional(), evidence: str.optional(), note: str.optional(), looks: str.optional(), gender: str.optional(), face: z.unknown().optional(), was: str.optional() }),
+    )
     .optional(),
   address: z
     .array(
@@ -79,6 +81,13 @@ export function parseRegionObject(value: unknown, validIds: ReadonlySet<string>,
   };
 }
 
+/** A per-mille [x0, y0, x1, y1] box that is inside the page and not degenerate, else undefined. */
+function faceBox(v: unknown): [number, number, number, number] | undefined {
+  if (!Array.isArray(v) || v.length !== 4 || !v.every((n) => typeof n === "number" && n >= 0 && n <= 1000)) return undefined;
+  const [x0, y0, x1, y1] = v as number[];
+  return x1 - x0 >= 10 && y1 - y0 >= 10 ? [x0, y0, x1, y1] : undefined;
+}
+
 export function parseNotesObject(value: unknown): PageNotes | null {
   const parsed = NotesLine.safeParse(value);
   if (!parsed.success) return null;
@@ -101,6 +110,11 @@ export function parseNotesObject(value: unknown): PageNotes | null {
         kind: (NAME_KINDS as string[]).includes(x.kind ?? "") ? (x.kind as NameKind) : "other",
         evidence: (x.evidence ?? "").trim(),
         note: x.note?.trim() || undefined,
+        // A label for someone not yet named, e.g. "(girl, short hair)", is not a description of this character.
+        ...(x.kind === "character" && x.looks?.trim() && !/[()]/.test(x.looks) && { looks: x.looks.trim().slice(0, 80) }),
+        ...(x.kind === "character" && (x.gender === "female" || x.gender === "male") && { gender: x.gender }),
+        ...(x.kind === "character" && faceBox(x.face) && { face: faceBox(x.face) }),
+        ...(x.kind === "character" && /^\(.+\)$/.test(x.was?.trim() ?? "") && { was: x.was!.trim() }),
       })),
     address: (n.address ?? [])
       .filter((x) => x.from.trim() && x.to.trim())
