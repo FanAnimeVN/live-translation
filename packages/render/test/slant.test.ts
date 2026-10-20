@@ -90,6 +90,16 @@ describe("textSlant", () => {
     expect(textSlant(img, [{ x: 40, y: 40, w: 320, h: 220 }], 16)).toBeUndefined();
   });
 
+  it("is not turned by long art lines across upright text (a hand reaching over a poster)", () => {
+    // UchiNoNyan'sDiary-005 r2: finger outlines at about 30 degrees cross the printed lines.
+    const img = image(400, 300);
+    block(img, 200, 150, 3, 9, 16, 0);
+    const a = (31 * Math.PI) / 180;
+    for (const off of [-60, -30, 0, 30, 60])
+      for (let t = -160; t <= 160; t += 0.5) for (const w of [0, 1]) dot(img, 200 + off + t * Math.cos(a) + w, 150 + t * Math.sin(a));
+    expect(textSlant(img, [{ x: 40, y: 40, w: 320, h: 220 }], 16)?.angle ?? 0).toBe(0);
+  });
+
   it("finds the bow of a single line of glyphs set along a curve", () => {
     const img = image(460, 220);
     const n = 12, s = 16, length = 360, bow = -40; // bulges up (towards -y)
@@ -163,37 +173,50 @@ describe("renderTranslation on slanted and curved free text", () => {
     expect(out[0].layout!.fontSize).toBeGreaterThanOrEqual(13);
   });
 
-  it("letters a card line by line on its printed lines, left-aligned, in order", () => {
-    // A licence-style card: three left-aligned printed rows of different lengths.
-    const img = image(420, 260);
+  it("letters a tilted card line by line on its printed lines, in order, at the card's angle", () => {
+    // A licence-style card drawn at an angle: three left-aligned printed rows of different lengths.
+    const img = image(460, 320);
+    const a = (-15 * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
     const rows = [9, 12, 6];
     rows.forEach((n, k) => {
-      for (let i = 0; i < n; i++) glyph(img, 60 + i * 22, 70 + k * 40, 16, 0);
+      for (let i = 0; i < n; i++) {
+        const u = -130 + i * 22, v = (k - 1) * 40;
+        glyph(img, 230 + u * c - v * s, 160 + u * s + v * c, 16, a);
+      }
     });
     const box = inkBounds(img);
     const r: TextRegion = { id: "r1", kind: "free", box, members: [box], score: 1, order: 0 };
     const vi = "Họ tên: Hamuru Kinsuki, sinh ngày 10 tháng 9 năm 12 Ma giới, địa chỉ quận Itabashi phố Majin 1-2-34";
-    const out = renderTranslation(ctxOver(img), { w: 420, h: 260 }, [r], { r1: tr("r1", "あ".repeat(27), vi) }, {
-      patches: { r1: { x: box.x, y: box.y, image: {}, textBoxes: [box] } },
-    });
-    const lines = out[0].layout!.lines;
-    expect(out[0].status).toBe("lettered");
-    expect(lines).toHaveLength(3);
+    const run = (text: string) =>
+      renderTranslation(ctxOver(img), { w: 460, h: 320 }, [r], { r1: tr("r1", "あ".repeat(27), text) }, {
+        patches: { r1: { x: box.x, y: box.y, image: {}, textBoxes: [box] } },
+      })[0];
+    const out = run(vi);
+    expect(out.status).toBe("lettered");
+    expect(out.printedLines).toBe(3);
+    expect(Math.abs((out.angle! * 180) / Math.PI + 15)).toBeLessThan(2);
+    const lines = out.layout!.lines;
     expect(lines.map((l) => l.text).join(" ")).toBe(vi);
-    for (let k = 0; k < 3; k++) {
-      // Starts at the printed line's left edge, sits on its row.
-      // (Upright card: the frame's page origin is the area's corner.)
-      expect(Math.abs(out[0].area!.x + lines[k].cx - lines[k].width / 2 - (60 - 8))).toBeLessThan(4);
-      expect(Math.abs(lines[k].top + out[0].layout!.fontSize * 0.58 - (lines[0].top + out[0].layout!.fontSize * 0.58) - k * 40)).toBeLessThan(6);
-    }
     // The long middle row takes the most words.
     expect(lines[1].text.split(" ").length).toBeGreaterThan(lines[2].text.split(" ").length);
     // Line breaks the model gave are kept when they match the rows.
     const given = "Họ tên: Hamuru Kinsuki\nĐịa chỉ: quận Itabashi, phố Majin 1-2-34\nCó hiệu lực";
-    const out2 = renderTranslation(ctxOver(img), { w: 420, h: 260 }, [r], { r1: tr("r1", "あ".repeat(27), given) }, {
-      patches: { r1: { x: box.x, y: box.y, image: {}, textBoxes: [box] } },
+    expect(run(given).layout!.lines.map((l) => l.text)).toEqual(given.split("\n"));
+  });
+
+  it("keeps an upright two-line caption as one block when line by line would set it smaller", () => {
+    // MN109-07 r10: a short handwritten caption in two left-aligned rows on open paper.
+    const img = image(420, 260);
+    [8, 5].forEach((n, k) => {
+      for (let i = 0; i < n; i++) glyph(img, 80 + i * 22, 100 + k * 34, 16, 0);
     });
-    expect(out2[0].layout!.lines.map((l) => l.text)).toEqual(given.split("\n"));
+    const box = inkBounds(img);
+    const r: TextRegion = { id: "r1", kind: "free", box, members: [box], score: 1, order: 0 };
+    const out = renderTranslation(ctxOver(img), { w: 420, h: 260 }, [r], { r1: tr("r1", "あ".repeat(13), "Những chú mèo hoang từng được thăng cấp thành con nhà mình") }, {
+      patches: { r1: { x: box.x, y: box.y, image: {}, textBoxes: [box] } },
+    })[0];
+    expect(out.status).toBe("lettered");
+    expect(out.printedLines).toBeUndefined();
   });
 
   it("keeps upright free text upright", () => {

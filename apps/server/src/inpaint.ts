@@ -10,7 +10,7 @@ import { INPAINT_DEVICE, INPAINT_ENGINE, LAMA_DEVICE, sessionOptions, type Inpai
 import { ROOT } from "./env";
 import type { DecodedPage } from "./image";
 import { LAMA_MODELS, loadLama, runLama, type LamaVariant } from "./lama";
-import { keepPictures, snapToPaper, textColours, wholeBoxes, withNeighbours } from "./redraw";
+import { clearOthers, keepPictures, snapBoxesToPaper, snapToPaper, textColours, wholeBoxes, withNeighbours } from "./redraw";
 
 /** andraniksargsyan/migan @ 406830d0fa60666da0071c342ad2fbc8f30c5c64, MIT (Picsart AI Research). */
 export const MIGAN_FILE = join(ROOT, "models", "inpaint", "migan_pipeline_v2.onnx");
@@ -295,6 +295,8 @@ export async function inpaintRegions(
   regions: TextRegion[],
   charSizes: Record<string, number> = {},
   rejected: Rejected[] = [],
+  /** Every region on the page: a hole never takes in another region's text boxes (see `clearOthers`). */
+  all: TextRegion[] = regions,
 ): Promise<Patch[]> {
   const s = await loadInpainter();
   const masker = textMaskWanted ? await loadTextMasker(textMaskWanted) : undefined;
@@ -312,22 +314,24 @@ export async function inpaintRegions(
     return engine === "lama" ? runLama(lama!, full, job) : runMigan(s, full, job);
   };
   // First every hole, then each redraw with the others masked too (see `withNeighbours`).
-  const pending: { r: TextRegion; members: Box[]; cs?: number; job: InpaintJob; ms: number }[] = [];
+  const pending: { r: TextRegion; members: Box[]; cs?: number; job: InpaintJob; ms: number; othersText: Box[] }[] = [];
   for (const r of regions) {
     const t0 = performance.now();
     const members = r.bubble ? textArea(r, cornersFlat(full, r.bubble)) : await refineTextBoxes(page, r);
     // The size guess is box area / character count: a tighter box means smaller glyphs.
     const cs = charSizes[r.id] && Math.sqrt((charSizes[r.id] ** 2 * members.reduce((a, m) => a + area(m), 0)) / area(r.box));
     const learned = pageMask ?? (masker ? await learnedTextMask(masker, full, members) : undefined);
-    const job = artTextMask(full, members, { charSize: cs, learned, grow: GROW });
+    // Other regions' text boxes and balloons: their own erase works there and must find them as they were.
+    const othersText = all.filter((o) => o.id !== r.id).flatMap((o) => (o.bubble ? [...o.members, o.bubble] : o.members));
+    const job = clearOthers(artTextMask(full, members, { charSize: cs, learned, grow: GROW }), members, othersText);
     if (job.bold) {
       rejected.push({ id: r.id, reason: "bold-text", coverage: job.coverage });
       continue;
     }
-    pending.push({ r, members, cs, job, ms: performance.now() - t0 });
+    pending.push({ r, members, cs, job, ms: performance.now() - t0, othersText });
   }
   const out: Patch[] = [];
-  for (const { r, members, cs, job: first, ms } of pending) {
+  for (const { r, members, cs, job: first, ms, othersText } of pending) {
     const t0 = performance.now() - ms;
     const others = pending.filter((o) => o.r !== r).map((o) => o.job);
     const pictures: Box[] = [];
@@ -339,14 +343,14 @@ export async function inpaintRegions(
       // Strokes escaped the glyph mask: reconstruct the whole text box instead (protected art stays).
       rejected.push({ id: r.id, reason: "glyphs-survived", coverage: job.coverage });
       // A photo or portrait inside a loose box is never part of a whole-box hole.
-      job = keepPictures(full, artTextMask(full, members, { charSize: cs, rect: true }), first, cs ?? 16, pictures);
+      job = clearOthers(keepPictures(full, artTextMask(full, members, { charSize: cs, rect: true }), first, cs ?? 16, pictures), members, othersText);
       masked = withNeighbours(job, others);
       result = await redraw(masked);
       if (residueAfter(full, result, job, members, cs) > MAX_RESIDUE_AFTER) {
         // Still ink left: bold strokes were kept as filled shapes. Redraw the glyph-sized ones too.
         rejected.push({ id: r.id, reason: "boxes-cleared", coverage: job.coverage });
         pictures.length = 0;
-        job = keepPictures(full, wholeBoxes(job, members, cs ?? 16), first, cs ?? 16, pictures);
+        job = clearOthers(keepPictures(full, wholeBoxes(job, members, cs ?? 16), first, cs ?? 16, pictures), members, othersText);
         masked = withNeighbours(job, others);
         result = await redraw(masked);
       }
@@ -354,6 +358,8 @@ export async function inpaintRegions(
       rejected.push({ id: r.id, reason: "visible-patch", coverage: job.coverage });
     }
     snapToPaper(full, result, job, masked);
+    // Text on a paper strip or in an open balloon that still shows ink: rebuild its boxes from the source.
+    if (residueAfter(full, result, job, members, cs) > MAX_RESIDUE_AFTER) job = snapBoxesToPaper(full, result, job, first, members, cs ?? 16);
     const colours = textColours(full, first, members, GROW(cs ?? 16));
     const { x, y, w, h } = job.crop;
     const n = w * h;

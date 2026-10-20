@@ -116,7 +116,8 @@ function chord(area: LayoutArea, y: number): number {
 function wrap(paragraphs: string[][], widths: number[], size: number, measure: Measure, force = false): string[] | null {
   const lines: string[] = [];
   let li = 0;
-  for (const words of paragraphs) {
+  for (const source of paragraphs) {
+    const words = [...source];
     let line = "";
     for (let wi = 0; wi < words.length; wi++) {
       const word = words[wi];
@@ -127,7 +128,16 @@ function wrap(paragraphs: string[][], widths: number[], size: number, measure: M
         continue;
       }
       if (!line) {
-        // A single word wider than the line: only allowed when forced.
+        // A single word wider than the line: break it after a hyphen when a part fits (a name
+        // with its honorific, "Moriguo-|kuuun!"); otherwise only allowed when forced.
+        const cut = hyphenCut(word, limit, size, measure);
+        if (cut) {
+          lines.push(cut[0]);
+          li++;
+          words.splice(wi + 1, 0, cut[1]);
+          if (li >= widths.length) return force ? [...lines, words.slice(wi + 1).join(" ")] : null;
+          continue;
+        }
         if (!force) return null;
         lines.push(word);
         li++;
@@ -146,6 +156,16 @@ function wrap(paragraphs: string[][], widths: number[], size: number, measure: M
     if (li > widths.length && !force) return null;
   }
   return lines.length <= widths.length || force ? lines : null;
+}
+
+/** The longest head of `word` ending in a hyphen that fits `limit`, and the rest; null if none. */
+function hyphenCut(word: string, limit: number, size: number, measure: Measure): [string, string] | null {
+  for (let i = word.length - 2; i > 0; i--) {
+    if (word[i] !== "-") continue;
+    const head = word.slice(0, i + 1);
+    if (measure(head, size) <= limit) return [head, word.slice(i + 1)];
+  }
+  return null;
 }
 
 function place(lines: string[], area: LayoutArea, size: number, lh: number, measure: Measure, overflow: boolean, padding: number): TextLayout {

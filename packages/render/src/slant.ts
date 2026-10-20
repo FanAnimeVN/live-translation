@@ -28,6 +28,11 @@ export interface Slant {
   /** True when the block is a column (main axis along the frame's y). */
   column: boolean;
   /**
+   * How the tilted source is written, from the projection that set the angle: glyphs stacked in
+   * columns (vertical Japanese) or set in rows (horizontal print). Unknown when upright.
+   */
+  written?: "columns" | "rows";
+  /**
    * The printed lines of a left-aligned horizontal block (a card, a form, a letter written
    * across): extents in the frame, relative to its centre, top to bottom. Small ruby lines are left out.
    */
@@ -46,38 +51,81 @@ const lumAt = (img: RGBAImage, x: number, y: number) => {
 
 /**
  * Ink pixels of the text inside `boxes`: the minority side of an Otsu split of their luminance
- * (dark letters on paper, or light letters on a dark ground), at most `max` of them.
+ * (dark letters on paper, or light letters on a dark ground), at most `max` of them. With
+ * `charSize`, only pieces of ink no bigger than 1.6 glyphs count: a hand reaching across a poster,
+ * speed lines or the rules of a form are long straight strokes that would otherwise set the angle.
  */
-export function inkPoints(img: RGBAImage, boxes: Box[], max = 6000): Array<[number, number]> {
+export function inkPoints(img: RGBAImage, boxes: Box[], max = 6000, charSize?: number): Array<[number, number]> {
   const hist = new Array<number>(256).fill(0);
-  const px: Array<[number, number, number]> = [];
-  const seen = new Set<number>();
+  let gx0 = Infinity, gy0 = Infinity, gx1 = -Infinity, gy1 = -Infinity;
+  for (const b of boxes) {
+    gx0 = Math.min(gx0, Math.max(0, Math.floor(b.x)));
+    gy0 = Math.min(gy0, Math.max(0, Math.floor(b.y)));
+    gx1 = Math.max(gx1, Math.min(img.width, Math.ceil(b.x + b.w)));
+    gy1 = Math.max(gy1, Math.min(img.height, Math.ceil(b.y + b.h)));
+  }
+  if (!(gx1 > gx0 && gy1 > gy0)) return [];
+  const W = gx1 - gx0, H = gy1 - gy0;
+  // Luminance inside the boxes (-1 outside them).
+  const lum = new Int16Array(W * H).fill(-1);
+  let n = 0;
   for (const b of boxes) {
     const x0 = Math.max(0, Math.floor(b.x)), y0 = Math.max(0, Math.floor(b.y));
     const x1 = Math.min(img.width, Math.ceil(b.x + b.w)), y1 = Math.min(img.height, Math.ceil(b.y + b.h));
     for (let y = y0; y < y1; y++)
       for (let x = x0; x < x1; x++) {
-        const k = y * img.width + x;
-        if (seen.has(k)) continue;
-        seen.add(k);
+        const k = (y - gy0) * W + (x - gx0);
+        if (lum[k] >= 0) continue;
         const l = Math.round(lumAt(img, x, y));
+        lum[k] = l;
         hist[l]++;
-        px.push([x, y, l]);
+        n++;
       }
   }
-  if (px.length < 50) return [];
-  const t = otsu(hist, px.length);
-  const dark = px.filter((p) => p[2] <= t).length;
-  const wantDark = dark <= px.length / 2;
-  const ink = px.filter((p) => (wantDark ? p[2] <= t : p[2] > t));
-  if (ink.length <= max) return ink.map((p) => [p[0], p[1]]);
+  if (n < 50) return [];
+  const t = otsu(hist, n);
+  let darkN = 0;
+  for (let v = 0; v <= t; v++) darkN += hist[v];
+  const wantDark = darkN <= n / 2;
+  const isInk = (k: number) => lum[k] >= 0 && (wantDark ? lum[k] <= t : lum[k] > t);
+  let ink: Array<[number, number]> = [];
+  if (!charSize) {
+    for (let k = 0; k < W * H; k++) if (isInk(k)) ink.push([gx0 + (k % W), gy0 + Math.floor(k / W)]);
+  } else {
+    // Glyph-sized pieces only (8-connected).
+    const limit = 1.6 * charSize;
+    const seen = new Uint8Array(W * H);
+    for (let k0 = 0; k0 < W * H; k0++) {
+      if (seen[k0] || !isInk(k0)) continue;
+      const piece = [k0];
+      seen[k0] = 1;
+      let x0 = W, y0 = H, x1 = 0, y1 = 0;
+      for (let i = 0; i < piece.length; i++) {
+        const k = piece[i];
+        const x = k % W, y = (k - x) / W;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx, yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+            const q = yy * W + xx;
+            if (seen[q] || !isInk(q)) continue;
+            seen[q] = 1;
+            piece.push(q);
+          }
+      }
+      if (x1 - x0 + 1 > limit || y1 - y0 + 1 > limit) continue;
+      for (const k of piece) ink.push([gx0 + (k % W), gy0 + Math.floor(k / W)]);
+    }
+  }
+  if (ink.length <= max) return ink;
   // A fixed pseudo-random sample: every k-th pixel in raster order would put its own grid in the
   // projections and favour the upright angle.
   let seed = 1234567;
   const out: Array<[number, number]> = [];
   for (const p of ink) {
     seed = (seed * 1664525 + 1013904223) >>> 0;
-    if (seed / 2 ** 32 < max / ink.length) out.push([p[0], p[1]]);
+    if (seed / 2 ** 32 < max / ink.length) out.push(p);
   }
   return out;
 }
@@ -132,7 +180,7 @@ function sharpness(pts: Array<[number, number]>, cx: number, cy: number, a: numb
  * ink gives no clear answer. `charSize` is the source glyph size, used for the curve test.
  */
 export function textSlant(img: RGBAImage, boxes: Box[], charSize: number): Slant | undefined {
-  const pts = inkPoints(img, boxes);
+  const pts = inkPoints(img, boxes, 6000, charSize);
   if (pts.length < 80) return undefined;
   let cx = 0, cy = 0;
   for (const [x, y] of pts) {
@@ -176,6 +224,8 @@ export function textSlant(img: RGBAImage, boxes: Box[], charSize: number): Slant
   // An upright line can still curve (a caption along an arc has no single tilt), and an upright
   // card or letter still has printed lines to letter on.
   const frame = frameOf(pts, cx, cy, tilted ? angle : 0, tilted ? gain : 1, charSize);
+  // Columns of glyphs sharpen the projection across the frame (u), rows the one down it (v).
+  if (tilted) frame.written = axis === 0 ? "columns" : "rows";
   return tilted || frame.bow !== undefined || frame.lines ? frame : undefined;
 }
 

@@ -152,6 +152,17 @@ describe("buildRegions", () => {
 
 describe("layoutText", () => {
   const measure = (t: string, size: number) => t.length * size * 0.5;
+  it("breaks a long hyphenated name after its hyphen instead of shrinking it to the minimum", () => {
+    // AppareKappore-009 r3: one word, a name with a stretched honorific, in a tall narrow balloon.
+    const area = { x: 0, y: 0, w: 60, h: 160, shape: "rect" as const };
+    const l = layoutText("Moriguo-kuuun!", area, measure, { maxSize: 24, minSize: 8 });
+    expect(l.overflow).toBe(false);
+    expect(l.lines.map((x) => x.text)).toEqual(["Moriguo-", "kuuun!"]);
+    expect(l.fontSize).toBeGreaterThanOrEqual(12);
+    // A word that fits stays whole.
+    expect(layoutText("Nana-chan", { x: 0, y: 0, w: 200, h: 60, shape: "rect" }, measure, { maxSize: 24 }).lines).toHaveLength(1);
+  });
+
   it("fits text inside an ellipse and centers the lines", () => {
     const area = { x: 0, y: 0, w: 120, h: 120, shape: "ellipse" as const };
     const l = layoutText("Hôm nay cũng được một mẻ lớn đấy!", area, measure, { maxSize: 30 });

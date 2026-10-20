@@ -84,6 +84,8 @@ export interface RegionRender {
   curved?: boolean;
   /** Corners of the drawn lettering (tilted lettering is not its upright `textBox`). */
   textQuad?: Array<[number, number]>;
+  /** Lettered line by line on this many printed lines of the source (a card, a form). */
+  printedLines?: number;
 }
 
 /** Reconstructed artwork for one region (from MI-GAN), drawn before lettering. */
@@ -214,19 +216,17 @@ export function renderTranslation(
     }
   }
 
-  // 1) Reconstructed artwork goes down first, so erasure and lettering see it.
+  // 1) Regions with reconstructed artwork. Their patches go down after the other regions are
+  //    erased on the source (step 2), so a region erases exactly as it did before any patch
+  //    existed: a patch overlapping its balloon (two balloons drawn overlapping) cannot turn a
+  //    clean erase into "needs inpainting" on the second pass.
   const patched = new Set<string>();
-  for (const r of regions) {
-    const p = opts.patches?.[r.id];
-    if (p && eligible(r, translations[r.id])) {
-      ctx.drawImage(p.image as never, p.x, p.y);
-      patched.add(r.id);
-    }
-  }
-  const img = ctx.getImageData(0, 0, size.w, size.h);
+  for (const r of regions) if (opts.patches?.[r.id] && eligible(r, translations[r.id])) patched.add(r.id);
+  let img = ctx.getImageData(0, 0, size.w, size.h);
 
   // 2) Erase. Anything that cannot be cleaned here waits for inpainting.
   const jobs: Job[] = [];
+  const deferred: Array<{ r: TextRegion; t: RegionTranslation; charSize?: number }> = [];
   for (const r of regions) {
     const t = translations[r.id];
     if (!t || (opts.only && !opts.only.has(r.id))) continue;
@@ -250,32 +250,21 @@ export function renderTranslation(
     const jaChars = [...t.ja.replace(/\s/g, "")].length;
     const charSize = jaChars ? Math.sqrt(area(r.box) / jaChars) : undefined;
     if (patched.has(r.id)) {
-      const bg = sampleBorder(img, r.box).bg;
-      const boxes = opts.patches?.[r.id]?.textBoxes ?? r.members;
-      const boxArea = boxes.reduce((a, b) => a + area(b), 0);
-      const ext = opts.patches?.[r.id]?.textExtent;
-      jobs.push({
-        r,
-        t,
-        onArt: true,
-        // A loose box beside a face would put the Vietnamese on the face: start from the old text.
-        seed: !r.bubble && ext && area(ext) < 0.85 * area(r.box) ? ext : undefined,
-        residue: glyphResidue(img, boxes, charSize && Math.sqrt((charSize * charSize * boxArea) / area(r.box))),
-        erase: { mode: "inpaint", bg, ink: opts.patches?.[r.id]?.ink ?? [20, 20, 20], flatness: 0, inkShare: 0, midShare: 0, erasedPixels: 0 },
-        outline: opts.patches?.[r.id]?.outline,
-        slant: slants.get(r.id),
-      });
+      deferred.push({ r, t, charSize });
       continue;
     }
     const snap = snapshot(img, r.bubble ? unionBox([...r.members, r.bubble]) : expand(unionBox(r.members), 6));
     const area_ = textArea(r, !!r.bubble && cornersFlat(img, r.bubble));
+    // A balloon erased glyph by glyph (no closed interior) only loses ink near its own text boxes.
+    const glyphBoxes = r.bubble ? r.members.map((m) => clipTo(expand(m, Math.max(3, 0.25 * (charSize ?? 16))), r.bubble!)) : undefined;
     const erase = eraseRegion(img, area_, {
       bubble: r.bubble,
       mode: r.bubble ? "auto" : "glyph",
       maxMid: r.bubble ? MAX_MID_BUBBLE : MAX_MID_FREE,
       charSize,
+      glyphBoxes,
     });
-    let residue = erase.mode === "skipped" ? Infinity : glyphResidue(img, area_, charSize);
+    let residue = erase.mode === "skipped" ? Infinity : glyphResidue(img, erase.mode === "glyph" && glyphBoxes ? glyphBoxes : area_, charSize);
     if (residue > MAX_RESIDUE && r.bubble) residue = retouch(img, r, area_, erase.bg, charSize, erase.interior);
     if (erase.mode === "skipped" && residue > MAX_RESIDUE) {
       restore(img, snap);
@@ -294,10 +283,38 @@ export function renderTranslation(
   }
   ctx.putImageData(img as never, 0, 0);
 
+  // Now the reconstructed artwork, which lettering then sees.
+  for (const { r } of deferred) {
+    const p = opts.patches![r.id]!;
+    ctx.drawImage(p.image as never, p.x, p.y);
+  }
+  if (deferred.length) img = ctx.getImageData(0, 0, size.w, size.h);
+  for (const { r, t, charSize } of deferred) {
+    const p = opts.patches![r.id]!;
+    const bg = sampleBorder(img, r.box).bg;
+    const boxes = p.textBoxes ?? r.members;
+    const boxArea = boxes.reduce((a, b) => a + area(b), 0);
+    const ext = p.textExtent;
+    jobs.push({
+      r,
+      t,
+      onArt: true,
+      // A loose box beside a face would put the Vietnamese on the face: start from the old text.
+      seed: !r.bubble && ext && area(ext) < 0.85 * area(r.box) ? ext : undefined,
+      residue: glyphResidue(img, boxes, charSize && Math.sqrt((charSize * charSize * boxArea) / area(r.box))),
+      erase: { mode: "inpaint", bg, ink: p.ink ?? [20, 20, 20], flatness: 0, inkShare: 0, midShare: 0, erasedPixels: 0 },
+      outline: p.outline,
+      slant: slants.get(r.id),
+    });
+  }
+  // Keep reading order: the regions' order, not erased-first.
+  const order0 = new Map(regions.map((r, i) => [r.id, i]));
+  jobs.sort((a, b) => order0.get(a.r.id)! - order0.get(b.r.id)!);
+
   // 3) Areas: the real balloon interior, or free space that avoids every other region.
   //    `hard` is lettering already placed that free text must stay clear of (step 5).
   const fontFor = (px: number, bold: boolean) => `${bold ? "bold " : ""}${px}px ${family}`;
-  const planFor = (job: Job, hard: Box[] = [], cap = 34) => {
+  const planFor = (job: Job, hard: Box[] = [], cap = 34): Plan => {
     const others = regions.filter((o) => o.id !== job.r.id).map((o) => o.bubble ?? o.box);
     const { area: box, rotated } = letteringArea(img, job, size, others, hard);
     const jaChars = [...job.t.ja.replace(/\s/g, "")].length || 4;
@@ -310,7 +327,14 @@ export function renderTranslation(
     const maxSize = Math.min(cap, Math.max(13, Math.min(34, Math.round(charSize * 0.95))));
     // Free text that sits at an angle or along a curve in the raw is lettered the same way.
     const slanted = job.slant && planSlanted(job.slant, job.t.vi, measure, maxSize);
-    if (slanted) return { ...job, ...slanted, rotated: false, bold, measure, maxSize };
+    if (slanted) {
+      // Upright printed lines: keep them only if the usual block (which may grow into free paper) is not clearly bigger.
+      if (slanted.doc && job.slant!.angle === 0) {
+        const upright = planFor({ ...job, slant: undefined }, hard, cap);
+        if (!upright.layout.overflow && slanted.layout.fontSize < 0.9 * upright.layout.fontSize) return upright;
+      }
+      return { ...job, ...slanted, rotated: false, bold, measure, maxSize };
+    }
     // Rotated captions are laid out in a frame where width and height are swapped.
     const frame: LayoutArea = rotated ? { x: 0, y: 0, w: box.h, h: box.w, shape: "rect" } : box;
     let layout = layoutText(job.t.vi, frame, measure, { maxSize, minSize: 9 });
@@ -464,6 +488,7 @@ export function renderTranslation(
       angle: p.angle,
       curved: p.arc !== undefined || undefined,
       textQuad: quadOf(p),
+      printedLines: p.doc?.length,
     });
   }
   return out;
@@ -644,6 +669,10 @@ function letteringArea(img: RGBAImage, job: Job, size: { w: number; h: number },
   }
   if (r.bubble) {
     const b = r.bubble;
+    // No closed interior (a burst balloon, one open into speed lines): its real paper, row by
+    // row, so the lettering stays off the spikes and the outline that erasing now keeps.
+    const scanned = scanBalloon(img, b, r.box);
+    if (scanned) return { area: scanned, rotated: false };
     const inset = { x: b.x + b.w * 0.09, y: b.y + b.h * 0.1, w: b.w * 0.82, h: b.h * 0.8 };
     const covers = inset.w >= r.box.w * 0.9 && inset.h >= r.box.h * 0.9;
     if (covers) return { area: { ...inset, shape: cornersFlat(img, b) ? "rect" : "ellipse" }, rotated: false };
@@ -662,6 +691,61 @@ function letteringArea(img: RGBAImage, job: Job, size: { w: number; h: number },
  * Cut `b` so it no longer enters any of `hard`: for each box it enters, keep the largest
  * part that lies entirely on one side of it. A box swallowed whole is left as it is.
  */
+/**
+ * The paper of a balloon whose interior could not be flood-filled, as row spans for a "mask"
+ * layout: from the middle of the text, each row runs left and right over light pixels until ink
+ * (the outline, a spike, a speed line); rows above and below must overlap the row next to them, so
+ * the scan stops where the balloon ends. Undefined when it finds less room than the text needs.
+ */
+function scanBalloon(img: RGBAImage, b: Box, text: Box): LayoutArea | undefined {
+  const W = img.width;
+  const lightAt = (x: number, y: number) => {
+    const i = (y * W + x) * 4;
+    return 0.299 * img.data[i] + 0.587 * img.data[i + 1] + 0.114 * img.data[i + 2] >= 110;
+  };
+  const x0 = Math.max(0, Math.ceil(b.x)), x1 = Math.min(W - 1, Math.floor(b.x + b.w) - 1);
+  const y0 = Math.max(0, Math.ceil(b.y + 0.04 * b.h)), y1 = Math.min(img.height - 1, Math.floor(b.y + 0.96 * b.h) - 1);
+  if (x1 - x0 < 10 || y1 - y0 < 10) return undefined;
+  const rowSpan = (y: number, l: number, r: number): [number, number] | null => {
+    // Start from the light pixel nearest the middle of the neighbouring row's span.
+    const c = Math.round((l + r) / 2);
+    let s = -1;
+    for (let d = 0; d <= (r - l) / 2 + 1 && s < 0; d++) {
+      if (c - d >= x0 && lightAt(c - d, y)) s = c - d;
+      else if (c + d <= x1 && lightAt(c + d, y)) s = c + d;
+    }
+    if (s < 0) return null;
+    let a = s, z = s;
+    while (a - 1 >= x0 && lightAt(a - 1, y)) a--;
+    while (z + 1 <= x1 && lightAt(z + 1, y)) z++;
+    return z - a >= 4 ? [a, z] : null;
+  };
+  const raw: Array<[number, number] | null> = new Array(y1 - y0 + 1).fill(null);
+  const cy = Math.min(y1, Math.max(y0, Math.round(text.y + text.h / 2)));
+  const cx = Math.min(x1, Math.max(x0, Math.round(text.x + text.w / 2)));
+  for (const dir of [-1, 1]) {
+    let prev: [number, number] = [cx - 2, cx + 2];
+    for (let y = dir < 0 ? cy : cy + 1; y >= y0 && y <= y1; y += dir) {
+      const sp = rowSpan(y, prev[0], prev[1]);
+      if (!sp || sp[1] < prev[0] - 2 || sp[0] > prev[1] + 2) break;
+      raw[y - y0] = sp;
+      prev = sp;
+    }
+  }
+  const rows = raw.filter(Boolean).length;
+  if (rows < 0.8 * Math.min(text.h, b.h * 0.9)) return undefined;
+  const inset = Math.max(3, Math.round(0.06 * Math.min(b.w, b.h)));
+  const spans = raw.map((s) => (s && s[1] - s[0] - 2 * inset > 6 ? ([s[0] + inset, s[1] - inset] as [number, number]) : null));
+  return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1, shape: "mask", spans };
+}
+
+/** `b` cut to `frame` (or `b` itself when they do not meet). */
+function clipTo(b: Box, frame: Box): Box {
+  const x0 = Math.max(b.x, frame.x), y0 = Math.max(b.y, frame.y);
+  const x1 = Math.min(b.x + b.w, frame.x + frame.w), y1 = Math.min(b.y + b.h, frame.y + frame.h);
+  return x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : b;
+}
+
 function clipAway(b: Box, hard: Box[]): Box {
   let x1 = b.x;
   let y1 = b.y;
@@ -816,7 +900,8 @@ function planSlanted(
     // A column is only lettered along itself when it is long and the text does not sit well
     // across it (the margin-column rule); otherwise the upright plan, which may grow into free
     // paper beside the column, reads better.
-    if (s.h < COLUMN_RATIO * s.w || !(layout.overflow || layout.lines.length >= 5)) return undefined;
+    // Text printed in rows that only happens to sit in a tall box (a poster) is never turned.
+    if (s.written === "rows" || s.h < COLUMN_RATIO * s.w || !(layout.overflow || layout.lines.length >= 5)) return undefined;
     const colFrame: LayoutArea = { x: 0, y: 0, w: fh, h: fw, shape: "rect" };
     const alt = layoutText(text, colFrame, measure, { maxSize, minSize: 9 });
     if (alt.overflow || alt.lines.length > 3) return undefined;
@@ -849,6 +934,21 @@ function planSlanted(
   return { box: { ...box, shape: "rect" }, frame, layout, angle, centre: [s.cx, s.cy], arc, doc: undefined };
 }
 
+/** A region's lettering plan: where and how its Vietnamese is set (see `renderTranslation`, step 3). */
+type Plan = Job & {
+  box: LayoutArea;
+  frame: LayoutArea;
+  rotated: boolean;
+  bold: boolean;
+  measure: (text: string, px: number) => number;
+  maxSize: number;
+  layout: TextLayout;
+  angle: number | undefined;
+  centre: [number, number] | undefined;
+  arc: number | undefined;
+  doc: DocLine[] | undefined;
+};
+
 /** One lettered line of a card, form or letter, in its frame (top-left origin, `y` = middle). */
 interface DocLine {
   text: string;
@@ -875,7 +975,8 @@ function lettersOnLines(
   fh: number,
 ): DocLine[] | undefined {
   const n = lines.length;
-  const base = lines.map((l) => Math.max(8, Math.min(maxSize, Math.round(0.88 * (l.v1 - l.v0)))));
+  // Vietnamese at the height of the printed line (its diacritics take the room ruby or leading leaves).
+  const base = lines.map((l) => Math.max(8, Math.min(maxSize, Math.round(l.v1 - l.v0))));
   const room = lines.map((l, k) => (k === n - 1 ? fw / 2 - l.u0 : l.u1 - l.u0));
   const given = text.split("\n").map((p) => p.trim()).filter(Boolean);
   let parts: string[];
@@ -917,7 +1018,8 @@ function lettersOnLines(
   }
   const fill = Math.max(...parts.map((p, k) => measure(p, base[k]) / room[k]));
   const scale = Math.min(1, 0.98 / fill);
-  if (scale < 0.6) return undefined;
+  // Breaks the model gave are meant for these rows: they may set a little smaller before giving up.
+  if (scale < (given.length === n ? 0.45 : 0.6)) return undefined;
   return parts.map((p, k) => {
     const px = Math.max(8, Math.floor(base[k] * scale));
     const l = lines[k];

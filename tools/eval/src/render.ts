@@ -51,6 +51,8 @@ interface PageQa {
   outsideBalloon: string[];
   inpaintMs: number;
   rejected: string[];
+  /** Lettering laid out like the raw: tilted (degrees), along a curve (~), on printed lines (=n). */
+  shaped: string[];
 }
 const report: PageQa[] = [];
 if (inpaint) await warmInpainters();
@@ -73,7 +75,7 @@ for (const page of pages) {
   const rejected: Rejected[] = [];
   if (inpaint && need.length) {
     const t0 = performance.now();
-    const patches = await inpaintRegions(d, result.regions.filter((r) => need.includes(r.id)), charSizesFor(result), rejected);
+    const patches = await inpaintRegions(d, result.regions.filter((r) => need.includes(r.id)), charSizesFor(result), rejected, result.regions);
     inpaintMs = Math.round(performance.now() - t0);
     const images: Record<string, PatchImage> = {};
     for (const p of patches) engines[p.engine ?? "migan"] = (engines[p.engine ?? "migan"] ?? 0) + 1;
@@ -109,7 +111,7 @@ for (const page of pages) {
     qa.outsideBalloon.length && `outside-balloon ${qa.outsideBalloon.join(",")}`,
     qa.waitingInpaint && `not-redrawn ${renders.filter((r) => r.status === "needs-inpaint").map((r) => r.id).join(",")}`,
   ].filter(Boolean);
-  console.log(`${page.id.padEnd(9)} lettered ${qa.lettered}/${qa.regions - qa.sfxOrDecorative} translatable, sfx/decor ${qa.sfxOrDecorative}, inpaint ${need.length} in ${inpaintMs} ms ${flags.length ? "| " + flags.join(" | ") : "| clean"}`);
+  console.log(`${page.id.padEnd(9)} lettered ${qa.lettered}/${qa.regions - qa.sfxOrDecorative} translatable, sfx/decor ${qa.sfxOrDecorative}, inpaint ${need.length} in ${inpaintMs} ms ${flags.length ? "| " + flags.join(" | ") : "| clean"}${qa.shaped.length ? ` (shaped ${qa.shaped.join(",")})` : ""}`);
 }
 
 const total = (k: keyof PageQa) => report.reduce((s, r) => s + (Array.isArray(r[k]) ? (r[k] as string[]).length : Number(r[k]) || 0), 0);
@@ -168,5 +170,8 @@ function score(pageId: string, result: PageResult, renders: RegionRender[], inpa
     outsideBalloon,
     inpaintMs,
     rejected: rejected.map((r) => `${r.id}:${r.reason}`),
+    shaped: lettered
+      .filter((r) => r.angle !== undefined)
+      .map((r) => `${r.id}:${((r.angle! * 180) / Math.PI).toFixed(0)}${r.curved ? "~" : ""}${r.printedLines ? `=${r.printedLines}` : ""}`),
   };
 }

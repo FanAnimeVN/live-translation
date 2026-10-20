@@ -140,7 +140,18 @@ export function dominantPaper(img: RGBAImage, box: Box): RGB | undefined {
 export function eraseRegion(
   img: RGBAImage,
   members: Box[],
-  opts: { bubble?: Box; mode?: "auto" | "glyph"; maxMid?: number; charSize?: number } = {},
+  opts: {
+    bubble?: Box;
+    mode?: "auto" | "glyph";
+    maxMid?: number;
+    charSize?: number;
+    /**
+     * Boxes repainted when only glyph strokes can be erased (default `members`). In a balloon whose
+     * interior cannot be found (a burst balloon open into speed lines) its inset box is not text:
+     * its spikes and speed lines would be painted over as one white block.
+     */
+    glyphBoxes?: Box[];
+  } = {},
 ): EraseReport {
   const bounds = { w: img.width, h: img.height };
   const union = members.reduce((u, m) => ({
@@ -193,7 +204,7 @@ export function eraseRegion(
   let erased = 0;
   let ex0 = Infinity, ey0 = Infinity, ex1 = -Infinity, ey1 = -Infinity;
   const inkSamples: number[][] = [[], [], []];
-  for (const m of members) {
+  for (const m of mode === "glyph" && opts.glyphBoxes ? opts.glyphBoxes : members) {
     const box = clampBox(expand(m, 3, bounds), img.width, img.height);
     const bx = Math.floor(box.x);
     const by = Math.floor(box.y);
@@ -486,8 +497,13 @@ function protectedComponents(mask: Uint8Array, w: number, h: number, charSize?: 
     const spanX = (maxX - minX + 1) / w;
     const spanY = (maxY - minY + 1) / h;
     const big = comp.length > 0.3 * w * h;
-    const lineLike = charSize ? isLineLike(maxX - minX + 1, maxY - minY + 1, comp.length, charSize) : false;
-    if ((touches && (spanX > 0.6 || spanY > 0.6)) || big || lineLike) for (const p of comp) out[p] = 1;
+    const bw = maxX - minX + 1, bh = maxY - minY + 1;
+    const lineLike = charSize ? isLineLike(bw, bh, comp.length, charSize) : false;
+    // A balloon outline lying wholly inside a loose box: a curve many characters long. Its pixels
+    // over its length (about 0.8 x (width + height) for an arc) give its stroke width; a glyph or
+    // a wave dash is never this long.
+    const curveLike = !!charSize && Math.max(bw, bh) > 2.5 * charSize && comp.length / Math.max(bw, bh, 0.8 * (bw + bh)) < Math.max(2.6, 0.15 * charSize);
+    if ((touches && (spanX > 0.6 || spanY > 0.6)) || big || lineLike || curveLike) for (const p of comp) out[p] = 1;
   }
   return out;
 }

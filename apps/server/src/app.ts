@@ -128,7 +128,7 @@ app.post("/api/translate", async (c) => {
         const ids = predictInpaint(decoded.ctx.getImageData(0, 0, decoded.w, decoded.h), regions);
         if (!ids.length) return;
         const rejected: Rejected[] = [];
-        const patches = await inpaintRegions(decoded, regions.filter((r) => ids.includes(r.id)), {}, rejected);
+        const patches = await inpaintRegions(decoded, regions.filter((r) => ids.includes(r.id)), {}, rejected, regions);
         rememberPatches(page.id, regions, patches);
         const kept = rejected.filter((x) => x.reason === "bold-text").map((x) => x.id);
         if (!abort.signal.aborted) await write({ type: "patches", patches, ms: Math.round(performance.now() - t0), kept });
@@ -187,7 +187,7 @@ app.post("/api/inpaint", async (c) => {
   let fresh: PatchData[] = [];
   if (missing.length) {
     const decoded = await decodeImage(await readPageImage(page));
-    fresh = await inpaintRegions(decoded, missing, result ? charSizesFor(result) : {}, rejected);
+    fresh = await inpaintRegions(decoded, missing, result ? charSizesFor(result) : {}, rejected, regions);
     rememberPatches(pageId, missing, fresh);
   }
   c.header("Cache-Control", "no-store");

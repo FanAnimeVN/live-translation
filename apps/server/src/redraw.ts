@@ -158,6 +158,28 @@ export function keepPictures(full: RGBAImage, job: InpaintJob, glyphs: InpaintJo
   return kept ? { ...job, hole } : job;
 }
 
+/**
+ * `job` without the text boxes of other regions (outside its own boxes): two balloons drawn
+ * overlapping each erase their own letters, and a hole reaching into the neighbour leaves model
+ * texture there that its own erase then counts as leftover ink. A sound effect kept as art next to
+ * the text stays untouched too.
+ */
+export function clearOthers(job: InpaintJob, own: Box[], others: Box[], pad = 2): InpaintJob {
+  const { crop } = job;
+  const near = others.filter((o) => o.x < crop.x + crop.w && o.y < crop.y + crop.h && o.x + o.w > crop.x && o.y + o.h > crop.y);
+  if (!near.length) return job;
+  const inside = (bs: Box[], x: number, y: number, p: number) => bs.some((b) => x >= b.x - p && y >= b.y - p && x < b.x + b.w + p && y < b.y + b.h + p);
+  let hole: Uint8Array | undefined;
+  for (let p = 0; p < job.hole.length; p++) {
+    if (!job.hole[p]) continue;
+    const x = crop.x + (p % crop.w), y = crop.y + Math.floor(p / crop.w);
+    if (!inside(near, x, y, 0) || inside(own, x, y, pad)) continue;
+    hole ??= Uint8Array.from(job.hole);
+    hole[p] = 0;
+  }
+  return hole ? { ...job, hole } : job;
+}
+
 /** `job` with every other pending hole that falls in its crop added to the model's mask. */
 export function withNeighbours(job: InpaintJob, others: InpaintJob[]): InpaintJob {
   const { crop } = job;
@@ -263,6 +285,126 @@ export function snapToPaper(full: RGBAImage, result: Uint8Array, job: InpaintJob
     snapped++;
   }
   return snapped;
+}
+
+/**
+ * Text set on plain paper inside its own boxes (a caption strip between two panels, a balloon
+ * cut open by the panel edge), when redrawing still left glyph ink. The ring around the hole holds
+ * art, so `snapToPaper` does not apply and the model fills the strip with the art around it, yet
+ * behind the letters there was only paper. When the core of the boxes outside the glyph hole
+ * (`glyphs`), stroke edges left out, is one light tone, each box is rebuilt from the source like an
+ * erased balloon: ink reaching the box edge (a border rule, an outline, art passing through) and
+ * solid shapes (an eye) keep their source pixels; everything else becomes that paper, i.e. the
+ * letters, strokes the masks kept as hatching and the smudges of the model. Returns `job` with its
+ * hole changed to match, or `job` itself when the ground is not plain paper.
+ */
+export function snapBoxesToPaper(full: RGBAImage, result: Uint8Array, job: InpaintJob, glyphs: InpaintJob, members: Box[], charSize: number): InpaintJob {
+  const { crop } = job;
+  const n = crop.w * crop.h;
+  const lumXY = (x: number, y: number) => lumOf(full.data, (y * full.width + x) * 4);
+  const glyphAt = (x: number, y: number) => {
+    const gx = x - glyphs.crop.x, gy = y - glyphs.crop.y;
+    return gx >= 0 && gy >= 0 && gx < glyphs.crop.w && gy < glyphs.crop.h && glyphs.hole[gy * glyphs.crop.w + gx] === 1;
+  };
+  // The ground behind the letters: light pixels in the core of the boxes, away from any stroke
+  // (the glyph hole, dark pixels and their antialiased edges). Dense text leaves little of it, so
+  // its being one light tone is what counts.
+  const lums: number[] = [];
+  const idx: number[] = [];
+  let total = 0;
+  for (const m of members) {
+    const ex = Math.min(0.15 * m.w, 0.15 * m.h), ey = 0.2 * m.h;
+    for (let y = Math.max(1, Math.round(m.y + ey)); y < Math.min(full.height - 1, Math.round(m.y + m.h - ey)); y++)
+      for (let x = Math.max(1, Math.round(m.x + ex)); x < Math.min(full.width - 1, Math.round(m.x + m.w - ex)); x++) {
+        total++;
+        if (glyphAt(x, y) || lumXY(x, y) < 120) continue;
+        let edge = false;
+        for (let dy = -1; dy <= 1 && !edge; dy++) for (let dx = -1; dx <= 1 && !edge; dx++) if (lumXY(x + dx, y + dy) < 160) edge = true;
+        if (edge) continue;
+        lums.push(lumXY(x, y));
+        idx.push((y * full.width + x) * 4);
+      }
+  }
+  if (lums.length < 50 || lums.length < 0.12 * total) return job;
+  const m = median(lums);
+  if (m < PAPER_MIN_LUM || lums.filter((v) => Math.abs(v - m) <= 24).length / lums.length < PAPER_SHARE) return job;
+  const near = idx.filter((_, k) => Math.abs(lums[k] - m) <= 24);
+  const paper = [0, 1, 2].map((c) => median(near.map((i) => full.data[i + c])));
+  const W = crop.w, H = crop.h;
+  const hole = Uint8Array.from(job.hole);
+  const long = 1.6 * charSize;
+  for (const mb of members) {
+    // A tight detector box cuts the first and last glyph of a line: reach a little past its ends.
+    const pad = Math.round(0.3 * charSize);
+    const across = mb.w >= mb.h;
+    const x0 = Math.max(0, Math.round(mb.x) - crop.x - (across ? pad : 0)), y0 = Math.max(0, Math.round(mb.y) - crop.y - (across ? 0 : pad));
+    const x1 = Math.min(W, Math.round(mb.x + mb.w) - crop.x + (across ? pad : 0)), y1 = Math.min(H, Math.round(mb.y + mb.h) - crop.y + (across ? 0 : pad));
+    if (x1 <= x0 || y1 <= y0) continue;
+    const bw = x1 - x0, bh = y1 - y0;
+    const dark = (qx: number, qy: number) => lumXY(crop.x + x0 + qx, crop.y + y0 + qy) < 110;
+    // The core of the box (where the letters are), in box coordinates.
+    const ex = Math.min(0.15 * mb.w, 0.15 * mb.h), ey = 0.2 * mb.h;
+    const cx0 = Math.round(mb.x) - crop.x - x0 + ex, cx1 = Math.round(mb.x + mb.w) - crop.x - x0 - ex;
+    const cy0 = Math.round(mb.y) - crop.y - y0 + ey, cy1 = Math.round(mb.y + mb.h) - crop.y - y0 - ey;
+    const inCore = (qx: number, qy: number) => qx >= cx0 && qx < cx1 && qy >= cy0 && qy < cy1;
+    // Length of the straight dark run through a pixel, across and down.
+    const run = (qx: number, qy: number) => {
+      let a = 1, b = 1;
+      for (let x = qx - 1; x >= 0 && dark(x, qy); x--) a++;
+      for (let x = qx + 1; x < bw && dark(x, qy); x++) a++;
+      for (let y = qy - 1; y >= 0 && dark(qx, y); y--) b++;
+      for (let y = qy + 1; y < bh && dark(qx, y); y++) b++;
+      return Math.max(a, b);
+    };
+    const keep = new Uint8Array(bw * bh);
+    const seen = new Uint8Array(bw * bh);
+    for (let q0 = 0; q0 < bw * bh; q0++) {
+      if (seen[q0] || !dark(q0 % bw, Math.floor(q0 / bw))) continue;
+      const piece = [q0];
+      seen[q0] = 1;
+      let touches = false, px0 = bw, py0 = bh, px1 = 0, py1 = 0;
+      for (let k = 0; k < piece.length; k++) {
+        const q = piece[k];
+        const qx = q % bw, qy = (q - qx) / bw;
+        px0 = Math.min(px0, qx); px1 = Math.max(px1, qx); py0 = Math.min(py0, qy); py1 = Math.max(py1, qy);
+        if (qx === 0 || qy === 0 || qx === bw - 1 || qy === bh - 1) touches = true;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = qx + dx, ny = qy + dy;
+            if (nx < 0 || ny < 0 || nx >= bw || ny >= bh) continue;
+            const nq = ny * bw + nx;
+            if (seen[nq] || !dark(nx, ny)) continue;
+            seen[nq] = 1;
+            piece.push(nq);
+          }
+      }
+      const pw = px1 - px0 + 1, ph = py1 - py0 + 1;
+      const solid = piece.length >= 0.55 * pw * ph && Math.min(pw, ph) >= Math.max(3, 0.25 * charSize);
+      if (solid) for (const q of piece) keep[q] = 1;
+      else if (touches && Math.max(pw, ph) > long)
+        // A rule, an outline or art running through. Letters touching it in the core are not part of it.
+        for (const q of piece) {
+          const qx = q % bw, qy = (q - qx) / bw;
+          if (!inCore(qx, qy) || run(qx, qy) > long) keep[q] = 1;
+        }
+    }
+    // Antialiased rims of what is kept stay too.
+    const rim = dilate(keep, bw, bh, 1);
+    for (let qy = 0; qy < bh; qy++)
+      for (let qx = 0; qx < bw; qx++) {
+        const q = qy * bw + qx;
+        const p = (y0 + qy) * W + x0 + qx;
+        if (keep[q] || (rim[q] && lumXY(crop.x + x0 + qx, crop.y + y0 + qy) < m - 24)) {
+          hole[p] = 0;
+          continue;
+        }
+        hole[p] = 1;
+        result[p] = paper[0];
+        result[n + p] = paper[1];
+        result[2 * n + p] = paper[2];
+      }
+  }
+  return { ...job, hole };
 }
 
 /**
