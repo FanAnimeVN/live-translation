@@ -1,16 +1,19 @@
 import {
   area,
+  artTextMask,
   clampBox,
   eraseRegion,
   expand,
   intersect,
   glyphResidue,
   layoutText,
+  roundBox,
   sampleBorder,
   spansFromMask,
   textArea,
   type Box,
   type EraseReport,
+  type InteriorMask,
   type LayoutArea,
   type RegionTranslation,
   type RGBAImage,
@@ -50,6 +53,10 @@ const MAX_MID_FREE = 0.08;
 const MAX_MID_BUBBLE = 0.12;
 /** Glyph-shaped ink left in the text core above this share means lettering would sit on leftover Japanese. */
 export const MAX_RESIDUE = 0.02;
+/** Free text at least this many times taller than wide is a column: it may be lettered along it. */
+const COLUMN_RATIO = 3.5;
+/** Clear space kept between two regions' lettering, px. */
+const LETTER_GAP = 3;
 const MARK_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#008080", "#f032e6", "#9a6324"];
 
 export interface RegionRender {
@@ -142,7 +149,9 @@ export function predictInpaint(img: RGBAImage, regions: TextRegion[]): string[] 
     const snap = snapshot(copy, r.bubble ? unionBox([...r.members, r.bubble]) : expand(unionBox(r.members), 6));
     const area_ = textArea(r, !!r.bubble && cornersFlat(copy, r.bubble));
     const erase = eraseRegion(copy, area_, { bubble: r.bubble, mode: r.bubble ? "auto" : "glyph", maxMid: r.bubble ? MAX_MID_BUBBLE : MAX_MID_FREE });
-    const needs = erase.mode === "skipped" || glyphResidue(copy, area_) > MAX_RESIDUE;
+    let residue = erase.mode === "skipped" ? Infinity : glyphResidue(copy, area_);
+    if (residue > MAX_RESIDUE && r.bubble) residue = retouch(copy, r, area_, erase.bg);
+    const needs = residue > MAX_RESIDUE;
     restore(copy, snap);
     if (needs) out.push(r.id);
   }
@@ -226,11 +235,13 @@ export function renderTranslation(
       maxMid: r.bubble ? MAX_MID_BUBBLE : MAX_MID_FREE,
       charSize,
     });
-    if (erase.mode === "skipped") {
+    let residue = erase.mode === "skipped" ? Infinity : glyphResidue(img, area_, charSize);
+    if (residue > MAX_RESIDUE && r.bubble) residue = retouch(img, r, area_, erase.bg, charSize, erase.interior);
+    if (erase.mode === "skipped" && residue > MAX_RESIDUE) {
+      restore(img, snap);
       out.push({ id: r.id, status: "needs-inpaint", needsInpaint: true, erase });
       continue;
     }
-    const residue = glyphResidue(img, area_, charSize);
     if (residue > MAX_RESIDUE) {
       restore(img, snap);
       out.push({ id: r.id, status: "needs-inpaint", needsInpaint: true, erase, residue });
@@ -244,10 +255,11 @@ export function renderTranslation(
   ctx.putImageData(img as never, 0, 0);
 
   // 3) Areas: the real balloon interior, or free space that avoids every other region.
+  //    `hard` is lettering already placed that free text must stay clear of (step 5).
   const fontFor = (px: number, bold: boolean) => `${bold ? "bold " : ""}${px}px ${family}`;
-  const plans = jobs.map((job) => {
+  const planFor = (job: Job, hard: Box[] = [], cap = 34) => {
     const others = regions.filter((o) => o.id !== job.r.id).map((o) => o.bubble ?? o.box);
-    const { area: box, rotated } = letteringArea(img, job, size, others);
+    const { area: box, rotated } = letteringArea(img, job, size, others, hard);
     const jaChars = [...job.t.ja.replace(/\s/g, "")].length || 4;
     const charSize = Math.sqrt(area(job.r.box) / jaChars);
     const bold = job.t.style.includes("shout");
@@ -257,13 +269,24 @@ export function renderTranslation(
     };
     // Rotated captions are laid out in a frame where width and height are swapped.
     const frame: LayoutArea = rotated ? { x: 0, y: 0, w: box.h, h: box.w, shape: "rect" } : box;
-    const maxSize = Math.max(13, Math.min(34, Math.round(charSize * 0.95)));
+    const maxSize = Math.min(cap, Math.max(13, Math.min(34, Math.round(charSize * 0.95))));
     let layout = layoutText(job.t.vi, frame, measure, { maxSize, minSize: 9 });
     let finalBox = box;
     let finalFrame = frame;
+    if (layout.overflow && job.r.bubble && box.shape === "mask") {
+      // An open balloon (cut by the panel edge) leaves a ragged interior mask: try its inner box.
+      const b = job.r.bubble;
+      const inner: LayoutArea = { x: b.x + b.w * 0.09, y: b.y + b.h * 0.1, w: b.w * 0.82, h: b.h * 0.8, shape: cornersFlat(img, b) ? "rect" : "ellipse" };
+      const retry = layoutText(job.t.vi, inner, measure, { maxSize, minSize: 9 });
+      if (!retry.overflow || retry.fontSize > layout.fontSize) {
+        layout = retry;
+        finalBox = inner;
+        finalFrame = inner;
+      }
+    }
     if (layout.overflow && !rotated && box.shape === "rect" && !job.r.bubble) {
       // Free text that does not fit: grow into free space before shrinking further.
-      const grown: LayoutArea = { ...avoid(grow(box, 0.3, 0.3, size), job.r.box, others), shape: "rect" };
+      const grown: LayoutArea = { ...clipAway(avoid(grow(box, 0.3, 0.3, size), job.r.box, others), hard), shape: "rect" };
       const retry = layoutText(job.t.vi, grown, measure, { maxSize, minSize: 8 });
       if (!retry.overflow || retry.fontSize >= layout.fontSize) {
         layout = retry;
@@ -273,8 +296,26 @@ export function renderTranslation(
     } else if (layout.overflow) {
       layout = layoutText(job.t.vi, frame, measure, { maxSize, minSize: 8 });
     }
-    return { ...job, box: finalBox, frame: finalFrame, rotated, bold, measure, maxSize, layout };
-  });
+    // A tall narrow column of free text (a sign, a caption down the page margin): stacked a word
+    // per line it reads badly, and spread sideways it leaves the column; turned 90 degrees along
+    // the column it reads like the original and stays where the Japanese was.
+    let turned = rotated;
+    const col = job.seed ?? job.r.box;
+    const upright = textBounds(layout, finalBox);
+    const wanders = !!upright && upright.w > 1.6 * col.w;
+    if (!rotated && !job.r.bubble && !hard.length && col.h >= COLUMN_RATIO * col.w && (layout.overflow || layout.lines.length >= 5 || wanders)) {
+      const colFrame: LayoutArea = { x: 0, y: 0, w: col.h, h: col.w, shape: "rect" };
+      const along = layoutText(job.t.vi, colFrame, measure, { maxSize, minSize: 9 });
+      if (!along.overflow && along.lines.length <= 3 && along.fontSize >= 0.8 * Math.min(layout.fontSize, maxSize)) {
+        layout = along;
+        finalBox = { x: col.x, y: col.y, w: col.w, h: col.h, shape: "rect" };
+        finalFrame = colFrame;
+        turned = true;
+      }
+    }
+    return { ...job, box: finalBox, frame: finalFrame, rotated: turned, bold, measure, maxSize, layout };
+  };
+  const plans = jobs.map((job) => planFor(job));
 
   // 4) Harmonise sizes across the page like a letterer would.
   const sizes = plans.filter((p) => !p.rotated).map((p) => p.layout.fontSize).sort((a, b) => a - b);
@@ -284,7 +325,25 @@ export function renderTranslation(
     if (sizes.length >= 3 && p.layout.fontSize > cap) p.layout = layoutText(p.t.vi, p.frame, p.measure, { maxSize: cap, minSize: 9 });
   }
 
-  // 5) Draw.
+  // 5) Lettering never overlaps. Free text grows into free paper and so does its neighbour,
+  //    so two captions can claim the same gap; two balloons joined into one (one paper area)
+  //    share an interior. In reading order, balloons first and free text last, lettering that
+  //    touches lettering already placed is laid out again, clear of it.
+  const free = (p: (typeof plans)[number]) => !p.r.bubble && !p.rotated;
+  const placed: Box[] = [];
+  const order = plans.map((_, i) => i).sort((a, b) => Number(free(plans[a])) - Number(free(plans[b])));
+  for (const i of order) {
+    const p = plans[i];
+    if (!p.rotated) {
+      const hard = placed.map((b) => expand(b, LETTER_GAP));
+      const text = textBounds(p.layout, p.box);
+      if (text && hard.some((h) => intersect(text, h))) plans[i] = planFor(p, hard, sizes.length >= 3 ? cap : 34);
+    }
+    const after = textBounds(plans[i].layout, plans[i].box, plans[i].rotated);
+    if (after) placed.push(after);
+  }
+
+  // 6) Draw.
   for (const p of plans) {
     const { layout } = p;
     ctx.save();
@@ -323,13 +382,161 @@ export function renderTranslation(
 
 const luminance = (c: [number, number, number]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 
+/** Share of the band just outside the text boxes that must be balloon paper for a retouch. */
+const PLAIN_BAND = 0.75;
+
+/**
+ * A balloon whose fill left letters behind (bold strokes touching each other or the outline,
+ * furigana, a balloon cut by the panel edge): repaint with the paper colour every ink blob
+ * that lies wholly inside the text boxes, and keep any ink that runs out of them (the outline,
+ * art). Only when the paper just outside the boxes is plain, i.e. the text sits on a light
+ * balloon, not on art. No inpainting is needed: a model asked to redraw a white balloon full of
+ * bold text paints grey smudges. `area_` is what the residue is measured on. Returns the
+ * residue afterwards, or Infinity when nothing was painted.
+ */
+function retouchBalloon(img: RGBAImage, textBoxes: Box[], area_: Box[], bg: [number, number, number], charSize?: number, interior?: InteriorMask): number {
+  const W = img.width;
+  const lumAt = (p: number) => 0.299 * img.data[p * 4] + 0.587 * img.data[p * 4 + 1] + 0.114 * img.data[p * 4 + 2];
+  const bgL = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
+  if (bgL < 170 || !textBoxes.length) return Infinity;
+  const isInk = (p: number) => bgL - lumAt(p) > 45;
+  const pad = Math.max(3, Math.round(0.2 * (charSize ?? 16)));
+  const boxes = textBoxes.map((m) => roundBox(clampBox(expand(m, pad), W, img.height)));
+  const u = roundBox(clampBox(unionBox(boxes), W, img.height));
+  const inBoxes = (x: number, y: number) => boxes.some((b) => x >= b.x && y >= b.y && x < b.x + b.w && y < b.y + b.h);
+  // Guard: the band 2-6 px outside the boxes is mostly paper.
+  let band = 0;
+  let paper = 0;
+  for (let y = Math.max(0, u.y - 6); y < Math.min(img.height, u.y + u.h + 6); y++)
+    for (let x = Math.max(0, u.x - 6); x < Math.min(W, u.x + u.w + 6); x++) {
+      if (inBoxes(x, y) || boxes.some((b) => x >= b.x - 2 && y >= b.y - 2 && x < b.x + b.w + 2 && y < b.y + b.h + 2)) continue;
+      band++;
+      if (Math.abs(lumAt(y * W + x) - bgL) < 30) paper++;
+    }
+  if (!band || paper / band < PLAIN_BAND) return Infinity;
+  // Ink blobs inside the boxes; a blob with ink right across the boxes' edge runs on (outline, art).
+  const seen = new Uint8Array(u.w * u.h);
+  const paint: number[] = [];
+  for (let sy = 0; sy < u.h; sy++)
+    for (let sx = 0; sx < u.w; sx++) {
+      const s0 = sy * u.w + sx;
+      const gx = u.x + sx;
+      const gy = u.y + sy;
+      if (seen[s0] || !inBoxes(gx, gy) || !isInk(gy * W + gx)) continue;
+      const comp: number[] = [];
+      let escapes = false;
+      const stack = [s0];
+      seen[s0] = 1;
+      while (stack.length) {
+        const q = stack.pop()!;
+        const qx = u.x + (q % u.w);
+        const qy = u.y + Math.floor(q / u.w);
+        comp.push(qy * W + qx);
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = qx + dx;
+            const ny = qy + dy;
+            if (nx < 0 || ny < 0 || nx >= W || ny >= img.height || !isInk(ny * W + nx)) continue;
+            if (!inBoxes(nx, ny)) {
+              escapes = true;
+              continue;
+            }
+            const n = (ny - u.y) * u.w + (nx - u.x);
+            if (!seen[n]) {
+              seen[n] = 1;
+              stack.push(n);
+            }
+          }
+      }
+      if (!escapes) paint.push(...comp);
+    }
+  if (!paint.length) return Infinity;
+  // One pixel more around each blob takes the antialiasing with it.
+  const grown = new Set<number>();
+  for (const p of paint) {
+    const x = p % W;
+    const y = (p - x) / W;
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) if (inBoxes(x + dx, y + dy)) grown.add((y + dy) * W + x + dx);
+  }
+  for (const p of grown) {
+    img.data[p * 4] = bg[0];
+    img.data[p * 4 + 1] = bg[1];
+    img.data[p * 4 + 2] = bg[2];
+    const px = p % W;
+    const py = (p - px) / W;
+    // The repainted letters are balloon interior now: lettering may use that room.
+    if (interior && px >= interior.x && py >= interior.y && px < interior.x + interior.w && py < interior.y + interior.h)
+      interior.mask[(py - interior.y) * interior.w + (px - interior.x)] = 1;
+  }
+  return glyphResidue(img, area_, charSize);
+}
+
+/**
+ * Second retouch pass for a balloon: paint the glyph strokes the text mask isolates (it follows
+ * strokes that touch each other or run close to the outline better than ink blobs do), again
+ * only where the paper around them is plain. Returns the residue, or Infinity when unsafe.
+ */
+function retouchGlyphs(img: RGBAImage, area_: Box[], bg: [number, number, number], charSize?: number, interior?: InteriorMask): number {
+  const job = artTextMask(img, area_, { charSize });
+  if (job.rect || job.coverage <= 0) return Infinity;
+  const { x, y, w, h } = job.crop;
+  const near = new Uint8Array(w * h);
+  for (let py = 0; py < h; py++)
+    for (let px = 0; px < w; px++) {
+      if (!job.hole[py * w + px]) continue;
+      for (let dy = -4; dy <= 4; dy++)
+        for (let dx = -4; dx <= 4; dx++) {
+          const qx = px + dx;
+          const qy = py + dy;
+          if (qx >= 0 && qy >= 0 && qx < w && qy < h) near[qy * w + qx] = 1;
+        }
+    }
+  let ring = 0;
+  let plain = 0;
+  for (let p = 0; p < w * h; p++) {
+    if (!near[p] || job.hole[p]) continue;
+    const i = ((y + Math.floor(p / w)) * img.width + x + (p % w)) * 4;
+    ring++;
+    if (Math.abs(img.data[i] - bg[0]) + Math.abs(img.data[i + 1] - bg[1]) + Math.abs(img.data[i + 2] - bg[2]) < 60) plain++;
+  }
+  if (!ring || plain / ring < 0.85) return Infinity;
+  for (let p = 0; p < w * h; p++) {
+    if (!job.hole[p]) continue;
+    const px = x + (p % w);
+    const py = y + Math.floor(p / w);
+    const i = (py * img.width + px) * 4;
+    img.data[i] = bg[0];
+    img.data[i + 1] = bg[1];
+    img.data[i + 2] = bg[2];
+    if (interior && px >= interior.x && py >= interior.y && px < interior.x + interior.w && py < interior.y + interior.h)
+      interior.mask[(py - interior.y) * interior.w + (px - interior.x)] = 1;
+  }
+  return glyphResidue(img, area_, charSize);
+}
+
+/** Both retouch passes, ink blobs first; the residue left (Infinity when neither could run). */
+function retouch(img: RGBAImage, r: TextRegion, area_: Box[], bg: [number, number, number], charSize?: number, interior?: InteriorMask): number {
+  const first = retouchBalloon(img, r.members, area_, bg, charSize, interior);
+  if (first <= MAX_RESIDUE) return first;
+  const second = retouchGlyphs(img, area_, bg, charSize, interior);
+  return Math.min(first, second);
+}
+
 /**
  * Where the Vietnamese text may go: the balloon interior when it is known, an inset
  * of the balloon box otherwise, or free space around free text that never enters
  * another region. Very tall, narrow captions get a wider horizontal band.
  */
-function letteringArea(img: RGBAImage, job: Job, size: { w: number; h: number }, others: Box[]): { area: LayoutArea; rotated: boolean } {
+function letteringArea(img: RGBAImage, job: Job, size: { w: number; h: number }, others: Box[], hard: Box[] = []): { area: LayoutArea; rotated: boolean } {
   const r = job.r;
+  // Laid out again clear of a neighbour's lettering (balloons joined into one): the balloon's
+  // inner box without the part the neighbour's text takes, as long as it still holds this text.
+  if (r.bubble && hard.length) {
+    const b = r.bubble;
+    const clipped = clipAway({ x: b.x + b.w * 0.09, y: b.y + b.h * 0.1, w: b.w * 0.82, h: b.h * 0.8 }, hard);
+    if (clipped.w > 8 && clipped.h > 8 && intersect(clipped, r.box)) return { area: { ...clipped, shape: "rect" }, rotated: false };
+  }
   const interior = job.erase.interior;
   if (interior) {
     const inset = Math.max(3, Math.round(Math.min(interior.w, interior.h) * 0.07));
@@ -348,7 +555,32 @@ function letteringArea(img: RGBAImage, job: Job, size: { w: number; h: number },
   // area just erased — and stop at art, panel borders and other regions. A narrow
   // column with no free space around it keeps its footprint and the words stack
   // one or two per line, which reads top-to-bottom like the original column.
-  return { area: { ...growFree(img, job.seed ?? r.box, job.erase.bg, others, size), shape: "rect" }, rotated: false };
+  const start = clipAway(job.seed ?? r.box, hard);
+  return { area: { ...growFree(img, start, job.erase.bg, [...others, ...hard], size), shape: "rect" }, rotated: false };
+}
+
+/**
+ * Cut `b` so it no longer enters any of `hard`: for each box it enters, keep the largest
+ * part that lies entirely on one side of it. A box swallowed whole is left as it is.
+ */
+function clipAway(b: Box, hard: Box[]): Box {
+  let x1 = b.x;
+  let y1 = b.y;
+  let x2 = b.x + b.w;
+  let y2 = b.y + b.h;
+  for (const h of hard) {
+    if (!intersect({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 }, h)) continue;
+    const sides = [
+      { x1: Math.max(x1, h.x + h.w), y1, x2, y2 },
+      { x1, y1, x2: Math.min(x2, h.x), y2 },
+      { x1, y1: Math.max(y1, h.y + h.h), x2, y2 },
+      { x1, y1, x2, y2: Math.min(y2, h.y) },
+    ].filter((s) => s.x2 > s.x1 && s.y2 > s.y1);
+    if (!sides.length) continue;
+    const best = sides.reduce((a, s) => ((s.x2 - s.x1) * (s.y2 - s.y1) > (a.x2 - a.x1) * (a.y2 - a.y1) ? s : a));
+    ({ x1, y1, x2, y2 } = best);
+  }
+  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
 }
 
 /** Grow `start` in 3 px strips while each new strip is free paper and touches no obstacle. */

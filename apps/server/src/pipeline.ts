@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   applyRegionRules,
+  area,
   buildUserParts,
   center,
   clampBox,
@@ -50,6 +51,9 @@ export interface PageInput {
   position: ReadingPosition;
   bytes: Buffer;
 }
+
+/** Detector confidence needed before a text the model reported outside every region is lettered in place. */
+const MISSED_MIN_SCORE = 0.4;
 
 export interface TranslateOptions {
   model: string;
@@ -284,9 +288,16 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
       const rough = fromPermille(note.box, d.w, d.h);
       const size = Math.max(rough.w, rough.h);
       const search = roundBox(clampBox(expand(rough, Math.max(16, size * 0.6)), d.w, d.h));
-      const near = expand(rough, size * 0.5);
-      const best = (await detectInCrop(d, search, 0.2))
-        .filter((c) => iou(c.box, rough) > 0.05 || containsPoint(near, center(c.box)))
+      // Lettering an added region erases what is under it, so the model's rough box is only a
+      // hint: the detector must find confident text right there, of about that size. Otherwise
+      // the note stays a note and the art is left alone (a wrong box once erased screentone and
+      // a character's face while the real text, a little to the side, stayed).
+      const near = expand(rough, size * 0.15);
+      const best = (await detectInCrop(d, search, MISSED_MIN_SCORE))
+        .filter((c) => {
+          const ratio = area(c.box) / Math.max(1, area(rough));
+          return ratio >= 0.2 && ratio <= 5 && (iou(c.box, rough) >= 0.2 || containsPoint(near, center(c.box)));
+        })
         .filter((c) => !taken.some((t) => containment(c.box, t) > 0.5 || containment(t, c.box) > 0.5))
         .sort((a, b) => iou(b.box, rough) - iou(a.box, rough) || b.score - a.score)[0];
       if (!best) continue;
