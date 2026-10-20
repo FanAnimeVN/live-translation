@@ -83,6 +83,27 @@ describe("renderTranslation layout", () => {
     expect(intersect(cap.textBox!, caption.box)).not.toBeNull();
   });
 
+  it("two balloons joined into one keep their lettering apart, each inside its own balloon", () => {
+    // Two speech balloons drawn overlapping, one paper area (UchiNoNyan'sDiary-006 r4/r5): each
+    // balloon's inner box reaches into the other's, so both texts claim the shared middle.
+    const upper = region("r1", { x: 115, y: 58, w: 53, h: 104 }, { x: 100, y: 40, w: 83, h: 140 });
+    const lower = region("r2", { x: 70, y: 133, w: 52, h: 87 }, { x: 57, y: 115, w: 75, h: 120 });
+    const translations = {
+      r1: tr("r1", "あいうえおか", "May quá nhỉ……"),
+      r2: tr("r2", "あいうえおかきく", "Được người tốt nhặt về nuôi…"),
+    };
+    const patches = { r1: patch(upper), r2: patch(lower) };
+    const out = renderTranslation(paperCtx(), size, [upper, lower], translations, { patches });
+    expect(out.map((r) => r.status)).toEqual(["lettered", "lettered"]);
+    expectNoOverlap(out);
+    for (const [r, reg] of [[out[0], upper], [out[1], lower]] as const) {
+      expect(r.overflow).toBe(false);
+      const t = r.textBox!;
+      const b = reg.bubble!;
+      expect(t.x >= b.x && t.y >= b.y && t.x + t.w <= b.x + b.w && t.y + t.h <= b.y + b.h, `${r.id} leaves its balloon`).toBe(true);
+    }
+  });
+
   it("a long caption down a narrow margin column is lettered along the column, a short one stays upright", () => {
     // A promotional caption running down the page margin (MN109-02 r11): a word per line would
     // take a dozen lines; turned along the column it takes one or two, inside the old column.

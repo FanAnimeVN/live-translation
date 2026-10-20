@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artTextMask, bubbleInterior, eraseRegion, isLineLike, type RGBAImage } from "../src";
+import { artTextMask, bubbleInterior, eraseRegion, isLineLike, type LearnedMask, type RGBAImage } from "../src";
 
 /** Synthetic grey image helpers (no manga images in tests). */
 function image(w: number, h: number, fill = 255): RGBAImage {
@@ -167,6 +167,90 @@ describe("artTextMask", () => {
     expect(at(54, 92)).toBe(0); // the eye is art
     const fallback = artTextMask(img, box, { charSize: 16, rect: true });
     expect(fallback.hole[(92 - fallback.crop.y) * fallback.crop.w + (54 - fallback.crop.x)]).toBe(0);
+  });
+});
+
+/** A learned text map over the whole image, certain (255) inside the given rectangles. */
+const learnedMap = (img: RGBAImage, rects: Array<[number, number, number, number]>): LearnedMask => {
+  const prob = new Uint8Array(img.width * img.height);
+  for (const [x, y, w, h] of rects) for (let yy = y; yy < y + h; yy++) prob.fill(255, yy * img.width + x, yy * img.width + x + w);
+  return { box: { x: 0, y: 0, w: img.width, h: img.height }, prob };
+};
+
+describe("artTextMask with a learned text mask", () => {
+  it("takes a letter the rules lose because it touches an art line, and leaves the line elsewhere", () => {
+    const img = image(200, 200, 230);
+    for (let y = 0; y < 200; y++) set(img, 100, y, 20); // long art line through the box
+    glyph(img, 60, 60, 16);
+    glyph(img, 60, 90, 16);
+    glyph(img, 86, 100, 16); // its right stroke runs into the art line: one component with it
+    const box = [{ x: 55, y: 55, w: 60, h: 80 }];
+    const at = (job: ReturnType<typeof artTextMask>, x: number, y: number) => job.hole[(y - job.crop.y) * job.crop.w + (x - job.crop.x)];
+    const rules = artTextMask(img, box, { charSize: 18 });
+    expect(at(rules, 86, 108)).toBe(0); // lost by the component rules
+    const job = artTextMask(img, box, { charSize: 18, learned: learnedMap(img, [[60, 60, 16, 16], [60, 90, 16, 16], [86, 100, 16, 16]]) });
+    expect(job.rect).toBe(false);
+    expect(at(job, 86, 108)).toBe(1);
+    expect(at(job, 60, 68)).toBe(1);
+    expect(at(job, 100, 75)).toBe(0); // the art line outside the letter stays
+  });
+
+  it("never takes protected art, even when the map marks the whole box as text", () => {
+    const img = image(160, 160, 235);
+    for (let k = 0; k < 4; k++) glyph(img, 50, 40 + k * 12, 9);
+    disc(img, 54, 92, 4, 10); // an eye under the handwriting
+    const box = [{ x: 46, y: 36, w: 20, h: 64 }];
+    const job = artTextMask(img, box, { charSize: 16, learned: learnedMap(img, [[0, 0, 160, 160]]) });
+    const at = (x: number, y: number) => job.hole[(y - job.crop.y) * job.crop.w + (x - job.crop.x)];
+    expect(at(50, 44)).toBe(1);
+    expect(at(54, 92)).toBe(0);
+
+    const hatch = image(220, 240, 250);
+    for (let x0 = -60; x0 < 220; x0 += 6)
+      for (let t = 0; t < 22; t++)
+        for (const y0 of [2, 24, 46]) {
+          const x = x0 + y0 + Math.round(t * 0.7);
+          const y = y0 + Math.round(t * 0.7);
+          if (x >= 0 && x < 219 && y < 62) rect(hatch, x, y, 2, 2, 20);
+        }
+    for (let k = 0; k < 4; k++) glyph(hatch, 78, 80 + k * 28, 20);
+    const hj = artTextMask(hatch, [{ x: 72, y: 38, w: 34, h: 160 }], { charSize: 22, learned: learnedMap(hatch, [[0, 0, 220, 240]]) });
+    const hat = (x: number, y: number) => hj.hole[(y - hj.crop.y) * hj.crop.w + (x - hj.crop.x)];
+    expect(hat(78, 90)).toBe(1);
+    let hatchIn = 0, hatchHole = 0;
+    for (let y = 40; y < 60; y++)
+      for (let x = 74; x < 104; x++)
+        if (get(hatch, x, y) < 100) {
+          hatchIn++;
+          hatchHole += hat(x, y);
+        }
+    expect(hatchHole / hatchIn).toBeLessThan(0.1);
+  });
+
+  it("keeps tone dots beside the letters as art when the map sees the letters but not the dots", () => {
+    const img = image(200, 200, 240);
+    for (let k = 0; k < 4; k++) glyph(img, 80, 30 + k * 30, 18);
+    for (let k = 0; k < 3; k++) rect(img, 104, 40 + k * 30, 3, 3, 20); // screentone dots inside the box
+    const box = [{ x: 74, y: 24, w: 40, h: 130 }];
+    const at = (job: ReturnType<typeof artTextMask>, x: number, y: number) => job.hole[(y - job.crop.y) * job.crop.w + (x - job.crop.x)];
+    expect(at(artTextMask(img, box, { charSize: 20 }), 105, 41)).toBe(1); // the rules take the dots for glyphs
+    const job = artTextMask(img, box, { charSize: 20, learned: learnedMap(img, [0, 1, 2, 3].map((k): [number, number, number, number] => [80, 30 + k * 30, 18, 18])) });
+    expect(at(job, 80, 40)).toBe(1);
+    expect(at(job, 105, 41)).toBe(0);
+  });
+
+  it("removes faint letters with the learned strokes instead of the whole box", () => {
+    const img = image(160, 200, 200);
+    for (let k = 0; k < 4; k++) glyph(img, 60, 30 + k * 34, 18, 160); // grey ink, too faint for the strong mask
+    const box = [{ x: 54, y: 24, w: 30, h: 140 }];
+    const rules = artTextMask(img, box, { charSize: 20 });
+    expect(rules.rect).toBe(true);
+    const job = artTextMask(img, box, { charSize: 20, learned: learnedMap(img, [0, 1, 2, 3].map((k): [number, number, number, number] => [60, 30 + k * 34, 18, 18])) });
+    const at = (x: number, y: number) => job.hole[(y - job.crop.y) * job.crop.w + (x - job.crop.x)];
+    expect(job.rect).toBe(false);
+    expect(at(60, 40)).toBe(1); // letter stroke
+    expect(at(69, 39)).toBe(0); // paper inside the letter, away from its strokes
+    expect(job.coverage).toBeLessThan(0.6 * rules.coverage);
   });
 });
 

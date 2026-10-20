@@ -20,6 +20,14 @@ export interface InpaintJob {
   bold?: boolean;
 }
 
+/** A learned text-probability map over a page box (from a text-segmentation model), 0-255 per pixel. */
+export interface LearnedMask {
+  /** Page-space box the map covers (integer coordinates). */
+  box: Box;
+  /** Row-major probability over `box`, 255 = text. */
+  prob: Uint8Array;
+}
+
 /** Ink must be this much darker (or lighter) than the local background; faint parts half as much. */
 const STRONG = 55;
 const FAINT = 25;
@@ -33,8 +41,26 @@ const FAINT = 25;
  * few pixels to take antialiasing and halos with it. When no glyphs can be isolated, or
  * `rect` is set, the whole text box becomes the hole except protected art: the text is
  * always redrawn, an eye inside the box never is.
+ *
+ * `learned` (a text-segmentation map, see LearnedMask) is a second signal. It adds strokes the
+ * component rules lost (letters fused with an art line, ink too faint for the strong mask): a
+ * learned pixel joins the hole only if it is ink of the text's polarity inside the box, not
+ * protected art, not part of a filled shape and not a straight stroke longer than a character
+ * (see `learnedStrokes`). When the rules isolate no glyphs it replaces the whole-box fallback;
+ * when it clearly sees the text, rule glyphs it does not support stay art (`supportedGlyphs`).
+ * Bold display lettering is decided before it and stays part of the art.
  */
-export function artTextMask(img: RGBAImage, members: Box[], opts: { charSize?: number; rect?: boolean } = {}): InpaintJob {
+export function artTextMask(
+  img: RGBAImage,
+  members: Box[],
+  opts: {
+    charSize?: number;
+    rect?: boolean;
+    learned?: LearnedMask;
+    /** How far the hole grows around the strokes, in pixels, for the character size the strokes were traced with (default 3). */
+    grow?: (charSize: number) => number;
+  } = {},
+): InpaintJob {
   const bounds = { w: img.width, h: img.height };
   const u = union(members);
   const margin = Math.min(160, Math.max(24, Math.round(0.5 * Math.max(u.w, u.h))));
@@ -43,6 +69,8 @@ export function artTextMask(img: RGBAImage, members: Box[], opts: { charSize?: n
   const lum = luminance(img, c);
   const cs0 = opts.charSize ?? Math.max(10, Math.min(...members.map((m) => Math.min(m.w, m.h))) * 0.8);
   const hole = new Uint8Array(W * c.h);
+  const learned = opts.learned && !opts.rect ? learnedIn(opts.learned, c) : undefined;
+  const learnedNear = learned && dilate(learned, W, c.h, 2);
   let boxPixels = 0;
   let rect = !!opts.rect;
   let ex0 = Infinity, ey0 = Infinity, ex1 = -Infinity, ey1 = -Infinity;
@@ -70,19 +98,35 @@ export function artTextMask(img: RGBAImage, members: Box[], opts: { charSize?: n
       for (let y = 0; y < pass.win.h; y++)
         for (let x = 0; x < pass.win.w; x++) if (g[y * pass.win.w + x] || pass.texture[y * pass.win.w + x]) protect[(pass.win.y + y) * W + (pass.win.x + x)] = 1;
     }
-    if (rect || coverageIn(st, b) < 0.02) {
+    let strokes = st;
+    let glyphs = st.glyph;
+    if (!rect && learned) {
+      // No glyphs isolated: the learned strokes of either polarity stand in for the whole box.
+      const found = [dark, light].filter((p): p is Strokes => !!p).map((p) => ({ p, add: learnedStrokes(learned, W, b, p, protect) }));
+      const pick = coverageIn(st, b) < 0.02 ? found.sort((x, y) => coverageOf(y.add, y.p.win, b) - coverageOf(x.add, x.p.win, b))[0] : found.find((f) => f.p === st)!;
+      if (pick && (coverageIn(st, b) >= 0.02 || coverageOf(pick.add, pick.p.win, b) >= 0.02)) {
+        strokes = pick.p;
+        glyphs = pick.add;
+        if (pick.p === st) {
+          const kept = supportedGlyphs(st, learnedNear!, W, b);
+          for (let q = 0; q < glyphs.length; q++) glyphs[q] |= kept[q];
+        }
+      }
+    }
+    if (rect || coverageOf(glyphs, strokes.win, b) < 0.02) {
       rect = true;
       const r = local(roundBox(clampBox(intersectBox(expand(m, 3), c), bounds.w, bounds.h)), c);
       for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) if (!protect[y * W + x]) hole[y * W + x] = 1;
       continue;
     }
-    const grown = dilate(st.glyph, st.win.w, st.win.h, 3);
-    for (let y = 0; y < st.win.h; y++)
-      for (let x = 0; x < st.win.w; x++) {
-        const q = y * st.win.w + x;
-        const pc = (st.win.y + y) * W + (st.win.x + x);
+    const sw = strokes.win;
+    const grown = dilate(glyphs, sw.w, sw.h, Math.max(1, Math.round(opts.grow ? opts.grow(strokes.cs) : 3)));
+    for (let y = 0; y < sw.h; y++)
+      for (let x = 0; x < sw.w; x++) {
+        const q = y * sw.w + x;
+        const pc = (sw.y + y) * W + (sw.x + x);
         if (grown[q] && !protect[pc]) hole[pc] = 1;
-        if (st.glyph[q]) {
+        if (glyphs[q]) {
           ex0 = Math.min(ex0, st.win.x + x);
           ey0 = Math.min(ey0, st.win.y + y);
           ex1 = Math.max(ex1, st.win.x + x);
@@ -130,6 +174,12 @@ interface Strokes {
   texture: Uint8Array;
   /** Median half-width of the strokes found, in pixels (lettering ~1-1.5, brush display text 4+). */
   pen: number;
+  /** All ink of this polarity (the faint mask), whatever its shape. */
+  ink: Uint8Array;
+  /** Strokes thicker than lettering anywhere in the window (filled shapes), grown to cover their edges. */
+  solid: Uint8Array;
+  /** Character size the strokes were traced with (after re-estimation). */
+  cs: number;
 }
 
 /**
@@ -228,7 +278,98 @@ function textStrokes(lum: Float32Array, W: number, H: number, b: Box, charSize: 
     const target = k.core > blobAt ? blob : glyph;
     for (const p of k.px) target[p] = 1;
   }
-  return { win, glyph, blob, texture, pen };
+  const thick = new Uint8Array(w * h);
+  for (let p = 0; p < thick.length; p++) if (depth[p] / 3 > blobAt) thick[p] = 1;
+  const solid = dilate(thick, w, h, Math.ceil(blobAt) + 1);
+  return { win, glyph, blob, texture, pen, ink: faint, solid, cs: charSize };
+}
+
+/** A learned map as a crop-local mask: 1 where the model gives text at least even odds. */
+function learnedIn(lm: LearnedMask, c: Box): Uint8Array {
+  const out = new Uint8Array(c.w * c.h);
+  for (let y = 0; y < lm.box.h; y++)
+    for (let x = 0; x < lm.box.w; x++) {
+      const cx = lm.box.x + x - c.x;
+      const cy = lm.box.y + y - c.y;
+      if (cx >= 0 && cy >= 0 && cx < c.w && cy < c.h && lm.prob[y * lm.box.w + x] >= 128) out[cy * c.w + cx] = 1;
+    }
+  return out;
+}
+
+/**
+ * The rule glyphs of pass `st` in box `b`, without the components the learned map gives no
+ * support at all (screentone dots, specks of art beside the text), but only when the map clearly
+ * sees this box's text (it covers most glyph pixels): otherwise every rule glyph is kept. A real
+ * letter dropped here is still caught by the residue check after inpainting.
+ */
+function supportedGlyphs(st: Strokes, near: Uint8Array, W: number, b: Box): Uint8Array {
+  const { win, glyph } = st;
+  const at = (q: number) => near[(win.y + Math.floor(q / win.w)) * W + win.x + (q % win.w)];
+  let all = 0, seen = 0;
+  for (let q = 0; q < glyph.length; q++)
+    if (glyph[q] && inside(b, win.x + (q % win.w), win.y + Math.floor(q / win.w))) {
+      all++;
+      seen += at(q);
+    }
+  if (!all || seen < 0.6 * all) return glyph;
+  const kept = new Uint8Array(glyph.length);
+  const done = new Uint8Array(glyph.length);
+  for (let s = 0; s < glyph.length; s++) {
+    if (!glyph[s] || done[s]) continue;
+    const comp = [s];
+    done[s] = 1;
+    let support = 0;
+    for (let k = 0; k < comp.length; k++) {
+      const p = comp[k];
+      support += at(p);
+      const x = p % win.w;
+      for (const n of [x > 0 ? p - 1 : -1, x < win.w - 1 ? p + 1 : -1, p - win.w, p + win.w])
+        if (n >= 0 && n < glyph.length && glyph[n] && !done[n]) {
+          done[n] = 1;
+          comp.push(n);
+        }
+    }
+    if (support >= 0.05 * comp.length) for (const p of comp) kept[p] = 1;
+  }
+  return kept;
+}
+
+/**
+ * Learned text pixels the component rules did not take, as a window mask of pass `st`: ink of
+ * the pass's polarity, never protected art (eyes, hatching), never a filled shape. Like a rule
+ * glyph, a component must lie almost entirely inside box `b` (crop-local), so the letters of a
+ * neighbouring region are left to it, and must not be a straight stroke longer than a character
+ * (hatching, speed lines and borders the hatching test did not reach).
+ */
+function learnedStrokes(learned: Uint8Array, W: number, b: Box, st: Strokes, protect: Uint8Array): Uint8Array {
+  const { win } = st;
+  const m = new Uint8Array(win.w * win.h);
+  for (let y = 0; y < win.h; y++)
+    for (let x = 0; x < win.w; x++) {
+      const q = y * win.w + x;
+      const pc = (win.y + y) * W + (win.x + x);
+      if (learned[pc] && st.ink[q] && !st.solid[q] && !st.glyph[q] && !protect[pc]) m[q] = 1;
+    }
+  const seen = new Uint8Array(m.length);
+  for (let s = 0; s < m.length; s++) {
+    if (!m[s] || seen[s]) continue;
+    const comp = [s];
+    seen[s] = 1;
+    let inBox = 0;
+    for (let k = 0; k < comp.length; k++) {
+      const p = comp[k];
+      const x = p % win.w;
+      if (inside(b, win.x + x, win.y + (p - x) / win.w)) inBox++;
+      for (const n of [x > 0 ? p - 1 : -1, x < win.w - 1 ? p + 1 : -1, p - win.w, p + win.w])
+        if (n >= 0 && n < m.length && m[n] && !seen[n]) {
+          seen[n] = 1;
+          comp.push(n);
+        }
+    }
+    const line = comp.length >= 4 ? straightLine(comp, win.w, 4) : undefined;
+    if (comp.length < 4 || inBox < 0.8 * comp.length || (line && line.len > 1.2 * st.cs)) for (const p of comp) m[p] = 0;
+  }
+  return m;
 }
 
 /** A straight stroke: centre, direction (radians, mod pi) and length; undefined when not elongated. */

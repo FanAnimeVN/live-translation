@@ -17,6 +17,21 @@ export const LAMA_MODELS = {
   lama: { file: join(ROOT, "models", "inpaint", "lama_fp32.onnx"), sha256: "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6" },
   /** opencv/inpainting_lama @ aee6d22f0a13e5e35af1c9a1c3afd62841fc6f3f (inpainting_lama_2025jan.onnx), Apache-2.0. */
   "lama-cv": { file: join(ROOT, "models", "inpaint", "inpainting_lama_2025jan.onnx"), sha256: "7df918ac3921d3daf0aae1d219776cf0dc4e4935f035af81841b40adcf74fdf2" },
+  /**
+   * big-lama finetuned on manga/anime: dreMaz/AnimeMangaInpainting @ 2953a4e935bf01ad1471f6cbfd26ab81abeeb92d
+   * (lama_large_512px.ckpt, sha256 11d30fbb3000fb2eceae318b75d9ced9229d99ae990a7f8b3ac35c8d31f2c935), MIT.
+   * Same network as `lama`: its weights were read without torch or pickled code (allowlisted tensors
+   * only) and written into the lama_fp32.onnx graph, BatchNorm folded the way that export folds it.
+   */
+  "lama-manga": { file: join(ROOT, "models", "inpaint", "lama_manga_fp32.onnx"), sha256: "114ac0cadd07e9c58a6ba4cd09b2b2943c24de19b042cd70e75be8fada3ccbf2" },
+  /**
+   * LaMa-MPE from manga-image-translator (GPL-3.0 project; training data not stated): release beta-0.3
+   * inpainting_lama_mpe.ckpt (sha256 d625aa1b3e0d0408acfd6928aa84f005867aa8dbb9162480346a4e20660786cc),
+   * 9 FFC blocks plus a masked position encoding. Exported with torch from tensors only (weights_only),
+   * Fourier units as DFT matrix products. The encoding is fed as zeros: its learned scales are ~0.001 and
+   * it moves the output by under half a grey level (measured 20/10).
+   */
+  "lama-mpe": { file: join(ROOT, "models", "inpaint", "lama_mpe_fp32.onnx"), sha256: "0f8a9a05be9b9de37ff3c349fff11281973590bbaa4a30c29a6397a7986ad624" },
 } as const;
 export type LamaVariant = keyof typeof LAMA_MODELS;
 
@@ -39,7 +54,11 @@ export function loadLama(v: LamaVariant = "lama", device: InpaintDevice = INPAIN
 const N = 512;
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-/** Reconstruct the job's hole with LaMa; returns planar RGB for `job.crop`, like the MI-GAN runner. */
+/**
+ * Reconstruct the job's hole with LaMa; returns planar RGB for `job.crop`, like the MI-GAN runner.
+ * The crop itself is fitted to 512x512: a 512 px page window at native scale measured worse for
+ * both variants (MAE 28.3 / 27.4 against 26.9 / 26.2, inpaint-bench 19/10).
+ */
 export async function runLama(s: ort.InferenceSession, full: RGBAImage, job: InpaintJob): Promise<Uint8Array> {
   const { x, y, w, h } = job.crop;
   // Square context around the crop, so the 512x512 resize keeps the aspect ratio.
@@ -91,7 +110,13 @@ export async function runLama(s: ort.InferenceSession, full: RGBAImage, job: Inp
     image[N * N + p] = (px[p * 4 + 1] / 255) * keep;
     image[2 * N * N + p] = (px[p * 4 + 2] / 255) * keep;
   }
-  const res = await s.run({ image: new ort.Tensor("float32", image, [1, 3, N, N]), mask: new ort.Tensor("float32", mask, [1, 1, N, N]) });
+  const feeds: Record<string, ort.Tensor> = { image: new ort.Tensor("float32", image, [1, 3, N, N]), mask: new ort.Tensor("float32", mask, [1, 1, N, N]) };
+  if (s.inputNames.includes("rel_pos")) {
+    // LaMa-MPE: zero position encoding (see LAMA_MODELS["lama-mpe"]).
+    feeds.rel_pos = new ort.Tensor("int64", new BigInt64Array(N * N), [1, N, N]);
+    feeds.direct = new ort.Tensor("float32", new Float32Array(N * N * 4), [1, N, N, 4]);
+  }
+  const res = await s.run(feeds);
   const out = res[s.outputNames[0]].data as Float32Array;
   const oc = createCanvas(N, N);
   const octx = oc.getContext("2d");
