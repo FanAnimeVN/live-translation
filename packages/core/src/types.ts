@@ -191,6 +191,12 @@ export interface PatchData {
   textBoxes: Box[];
   /** Bounds of the glyph strokes that were removed: where the original text really sat. */
   textExtent?: Box;
+  /** Colour of the source glyph strokes, when they could be isolated. */
+  ink?: [number, number, number];
+  /** One clean tone around the source strokes (an outline or a flat background), when there was one. */
+  outline?: [number, number, number];
+  /** Pictures inside the text boxes that were kept (a photo on a card): lettering keeps off them. */
+  keepOut?: Box[];
   /** Inpainter that redrew the art. */
   engine?: "migan" | "lama";
 }

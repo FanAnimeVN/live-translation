@@ -645,7 +645,7 @@ function Viewer(props: {
 
 /** Decode reconstructed-background patches (data URLs) into drawable images. */
 async function loadPatchImages(
-  patches: Array<{ id: string; x: number; y: number; dataUrl: string; textBoxes?: PatchImage["textBoxes"]; textExtent?: PatchImage["textExtent"] }>,
+  patches: Array<{ id: string; x: number; y: number; dataUrl: string; textBoxes?: PatchImage["textBoxes"]; textExtent?: PatchImage["textExtent"]; ink?: PatchImage["ink"]; outline?: PatchImage["outline"]; keepOut?: PatchImage["keepOut"] }>,
 ): Promise<Record<string, PatchImage>> {
   const loaded: Record<string, PatchImage> = {};
   await Promise.all(
@@ -654,7 +654,7 @@ async function loadPatchImages(
         new Promise<void>((resolve) => {
           const im = new Image();
           im.onload = () => {
-            loaded[p.id] = { x: p.x, y: p.y, image: im, textBoxes: p.textBoxes, textExtent: p.textExtent };
+            loaded[p.id] = { x: p.x, y: p.y, image: im, textBoxes: p.textBoxes, textExtent: p.textExtent, ink: p.ink, outline: p.outline, keepOut: p.keepOut };
             resolve();
           };
           im.onerror = () => resolve();

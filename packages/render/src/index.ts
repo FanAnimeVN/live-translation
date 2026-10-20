@@ -20,6 +20,9 @@ import {
   type TextLayout,
   type TextRegion,
 } from "@lt/core";
+import { arcLength, avoidAreas, avoidPictures, frameHas, frameQuad, placeOnArc, textSlant, type Slant } from "./slant";
+
+export { textSlant, type Slant } from "./slant";
 
 /** The subset of CanvasRenderingContext2D used here (browser and @napi-rs/canvas). */
 export interface Ctx2D {
@@ -75,6 +78,12 @@ export interface RegionRender {
   textBox?: Box;
   /** The text did not fit its area even at the minimum size. */
   overflow?: boolean;
+  /** Lettered at the source text's angle (radians), when it was tilted. */
+  angle?: number;
+  /** Lettered along the source line's curve. */
+  curved?: boolean;
+  /** Corners of the drawn lettering (tilted lettering is not its upright `textBox`). */
+  textQuad?: Array<[number, number]>;
 }
 
 /** Reconstructed artwork for one region (from MI-GAN), drawn before lettering. */
@@ -86,6 +95,11 @@ export interface PatchImage {
   textBoxes?: Box[];
   /** Where the removed glyphs really sat; lettering starts there instead of a loose box. */
   textExtent?: Box;
+  /** Source glyph colour and the clean tone around it, when the server could read them. */
+  ink?: [number, number, number];
+  outline?: [number, number, number];
+  /** Pictures inside the text boxes that were kept (a photo on a card): lettering keeps off them. */
+  keepOut?: Box[];
 }
 
 export interface RenderOptions {
@@ -133,6 +147,10 @@ interface Job {
   residue: number;
   /** Where lettering starts for free text, when tighter than the region box. */
   seed?: Box;
+  /** One clean tone the source strokes sat in (their outline or a flat ground), when known. */
+  outline?: [number, number, number];
+  /** Free text drawn at an angle or along a curve in the raw. */
+  slant?: Slant;
 }
 
 /**
@@ -175,6 +193,26 @@ export function renderTranslation(
   const out: RegionRender[] = [];
   const eligible = (r: TextRegion, t: RegionTranslation | undefined): t is RegionTranslation =>
     !!t && !(opts.only && !opts.only.has(r.id)) && TRANSLATABLE.has(t.role) && !!t.vi;
+
+  // 0) Tilted or curved free text, read from the untouched source before anything is drawn.
+  const slants = new Map<string, Slant>();
+  const loose = regions.filter((r) => !r.bubble && eligible(r, translations[r.id]) && !opts.keep?.has(r.id));
+  if (loose.length) {
+    const source = ctx.getImageData(0, 0, size.w, size.h);
+    for (const r of loose) {
+      const jaChars = [...translations[r.id]!.ja.replace(/\s/g, "")].length || 4;
+      const s = textSlant(source, opts.patches?.[r.id]?.textBoxes ?? r.members, Math.sqrt(area(r.box) / jaChars));
+      const keep = opts.patches?.[r.id]?.keepOut;
+      if (s) slants.set(r.id, keep?.length ? avoidPictures(s, keep) : s);
+    }
+    // A loose box often reaches over a neighbour on the same card: the bigger frame gives way to
+    // any smaller tilted block whose centre it holds, so their lettering does not collide.
+    const frames = [...slants];
+    for (const [id, s] of frames) {
+      const inside = frames.filter(([o, t]) => o !== id && t.w * t.h < s.w * s.h && frameHas(s, t.cx, t.cy)).map(([, t]) => frameQuad(t));
+      if (inside.length) slants.set(id, avoidAreas(s, inside));
+    }
+  }
 
   // 1) Reconstructed artwork goes down first, so erasure and lettering see it.
   const patched = new Set<string>();
@@ -223,7 +261,9 @@ export function renderTranslation(
         // A loose box beside a face would put the Vietnamese on the face: start from the old text.
         seed: !r.bubble && ext && area(ext) < 0.85 * area(r.box) ? ext : undefined,
         residue: glyphResidue(img, boxes, charSize && Math.sqrt((charSize * charSize * boxArea) / area(r.box))),
-        erase: { mode: "inpaint", bg, ink: [20, 20, 20], flatness: 0, inkShare: 0, midShare: 0, erasedPixels: 0 },
+        erase: { mode: "inpaint", bg, ink: opts.patches?.[r.id]?.ink ?? [20, 20, 20], flatness: 0, inkShare: 0, midShare: 0, erasedPixels: 0 },
+        outline: opts.patches?.[r.id]?.outline,
+        slant: slants.get(r.id),
       });
       continue;
     }
@@ -250,7 +290,7 @@ export function renderTranslation(
     // Free text: start the lettering where the old glyphs were, not in a loose detector box
     // that may cover art below a short caption.
     const ext = erase.extent && expand(erase.extent, 4);
-    jobs.push({ r, t, erase, onArt: false, residue, seed: !r.bubble && ext && area(ext) < 0.85 * area(r.box) ? ext : undefined });
+    jobs.push({ r, t, erase, onArt: false, residue, seed: !r.bubble && ext && area(ext) < 0.85 * area(r.box) ? ext : undefined, slant: slants.get(r.id) });
   }
   ctx.putImageData(img as never, 0, 0);
 
@@ -267,9 +307,12 @@ export function renderTranslation(
       ctx.font = fontFor(px, bold);
       return ctx.measureText(text).width;
     };
+    const maxSize = Math.min(cap, Math.max(13, Math.min(34, Math.round(charSize * 0.95))));
+    // Free text that sits at an angle or along a curve in the raw is lettered the same way.
+    const slanted = job.slant && planSlanted(job.slant, job.t.vi, measure, maxSize);
+    if (slanted) return { ...job, ...slanted, rotated: false, bold, measure, maxSize };
     // Rotated captions are laid out in a frame where width and height are swapped.
     const frame: LayoutArea = rotated ? { x: 0, y: 0, w: box.h, h: box.w, shape: "rect" } : box;
-    const maxSize = Math.min(cap, Math.max(13, Math.min(34, Math.round(charSize * 0.95))));
     let layout = layoutText(job.t.vi, frame, measure, { maxSize, minSize: 9 });
     let finalBox = box;
     let finalFrame = frame;
@@ -313,16 +356,18 @@ export function renderTranslation(
         turned = true;
       }
     }
-    return { ...job, box: finalBox, frame: finalFrame, rotated: turned, bold, measure, maxSize, layout };
+    return { ...job, box: finalBox, frame: finalFrame, rotated: turned, bold, measure, maxSize, layout, angle: undefined as number | undefined, centre: undefined as [number, number] | undefined, arc: undefined as number | undefined, doc: undefined as DocLine[] | undefined };
   };
-  const plans = jobs.map((job) => planFor(job));
+  // A picture kept inside the text boxes (a photo on a card) is an obstacle like other lettering.
+  const keepOut = (job: Job) => opts.patches?.[job.r.id]?.keepOut ?? [];
+  const plans = jobs.map((job) => planFor(job, keepOut(job)));
 
   // 4) Harmonise sizes across the page like a letterer would.
   const sizes = plans.filter((p) => !p.rotated).map((p) => p.layout.fontSize).sort((a, b) => a - b);
   const median = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0;
   const cap = Math.max(14, Math.round(median * 1.25));
   for (const p of plans) {
-    if (sizes.length >= 3 && p.layout.fontSize > cap) p.layout = layoutText(p.t.vi, p.frame, p.measure, { maxSize: cap, minSize: 9 });
+    if (sizes.length >= 3 && p.layout.fontSize > cap && p.arc === undefined && !p.doc) p.layout = layoutText(p.t.vi, p.frame, p.measure, { maxSize: cap, minSize: 9 });
   }
 
   // 5) Lettering never overlaps. Free text grows into free paper and so does its neighbour,
@@ -330,16 +375,21 @@ export function renderTranslation(
   //    share an interior. In reading order, balloons first and free text last, lettering that
   //    touches lettering already placed is laid out again, clear of it.
   const free = (p: (typeof plans)[number]) => !p.r.bubble && !p.rotated;
-  const placed: Box[] = [];
+  // Lettering is compared as it is drawn: two parallel tilted blocks on a card do not touch even
+  // though the upright boxes around them do.
+  const placed: Quad[] = [];
   const order = plans.map((_, i) => i).sort((a, b) => Number(free(plans[a])) - Number(free(plans[b])));
   for (const i of order) {
     const p = plans[i];
     if (!p.rotated) {
-      const hard = placed.map((b) => expand(b, LETTER_GAP));
-      const text = textBounds(p.layout, p.box);
-      if (text && hard.some((h) => intersect(text, h))) plans[i] = planFor(p, hard, sizes.length >= 3 ? cap : 34);
+      const text = quadOf(p);
+      // Lettering that would touch lettering already placed is laid out again (upright), clear of it.
+      if (text && placed.some((q) => quadsTouch(q, text, LETTER_GAP))) {
+        const hard = placed.map((q) => expand(quadBounds(q), LETTER_GAP));
+        plans[i] = planFor({ ...p, slant: undefined }, [...hard, ...keepOut(p)], sizes.length >= 3 ? cap : 34);
+      }
     }
-    const after = textBounds(plans[i].layout, plans[i].box, plans[i].rotated);
+    const after = quadOf(plans[i]);
     if (after) placed.push(after);
   }
 
@@ -350,20 +400,56 @@ export function renderTranslation(
     if (p.rotated) {
       ctx.translate(p.box.x + p.box.w, p.box.y);
       ctx.rotate(Math.PI / 2);
+    } else if (p.angle !== undefined && p.centre) {
+      // The frame is centred on the source block and turned with it.
+      ctx.translate(p.centre[0], p.centre[1]);
+      ctx.rotate(p.angle);
+      ctx.translate(-p.frame.w / 2, -p.frame.h / 2);
     }
+    // Along a curve each character is placed and turned on its own (see placeOnArc).
+    const glyphs =
+      p.arc !== undefined && layout.lines.length
+        ? (() => {
+            const chars = [...layout.lines[0].text.normalize("NFC")];
+            const at = placeOnArc(chars.map((ch) => p.measure(ch, layout.fontSize)), p.frame.w, p.arc!);
+            return chars.map((ch, k) => ({ ch, x: at[k].along, y: p.frame.h / 2 + at[k].across - p.arc! / 2, a: at[k].angle }));
+          })()
+        : undefined;
+    const draw = (paint: (text: string, x: number, y: number) => void) => {
+      if (p.doc) {
+        // Card or letter lines: each at its own size, from the printed line's left edge.
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        for (const d of p.doc) {
+          ctx.font = fontFor(d.px, p.bold);
+          paint(d.text, d.x, d.y);
+        }
+        return;
+      }
+      if (!glyphs) {
+        for (const line of layout.lines) paint(line.text, line.cx, line.top + layout.fontSize * 0.06);
+        return;
+      }
+      for (const g of glyphs) {
+        ctx.save();
+        ctx.translate(g.x, g.y);
+        ctx.rotate(g.a);
+        paint(g.ch, 0, 0);
+        ctx.restore();
+      }
+    };
     ctx.font = fontFor(layout.fontSize, p.bold);
     ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    const dy = layout.fontSize * 0.06;
+    ctx.textBaseline = glyphs ? "middle" : "top";
     if (p.onArt || !p.r.bubble) {
       // Text over artwork gets a halo, as letterers do for captions on screentone.
       ctx.lineJoin = "round";
       ctx.lineWidth = Math.max(2, layout.fontSize * (p.onArt ? 0.24 : 0.14));
-      ctx.strokeStyle = luminance(p.erase.ink) < 128 ? "rgba(255,255,255,0.96)" : "rgba(15,15,15,0.9)";
-      for (const line of layout.lines) ctx.strokeText(line.text, line.cx, line.top + dy);
+      ctx.strokeStyle = haloColour(p.erase.ink, p.outline);
+      draw((s, x, y) => ctx.strokeText(s, x, y));
     }
     ctx.fillStyle = `rgb(${p.erase.ink.join(",")})`;
-    for (const line of layout.lines) ctx.fillText(line.text, line.cx, line.top + dy);
+    draw((s, x, y) => ctx.fillText(s, x, y));
     ctx.restore();
     out.push({
       id: p.r.id,
@@ -373,14 +459,27 @@ export function renderTranslation(
       layout,
       rotated: p.rotated,
       residue: p.residue,
-      textBox: textBounds(layout, p.box, p.rotated),
+      textBox: boundsOf(p),
       overflow: layout.overflow,
+      angle: p.angle,
+      curved: p.arc !== undefined || undefined,
+      textQuad: quadOf(p),
     });
   }
   return out;
 }
 
 const luminance = (c: [number, number, number]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+
+/**
+ * The halo around lettering on art: the source's own outline or flat ground when it stands
+ * clear of the ink (white text outlined in black stays so), otherwise white around dark ink
+ * and black around light ink (manga-image-translator's rule when fg and bg are too close).
+ */
+export function haloColour(ink: [number, number, number], outline?: [number, number, number]): string {
+  if (outline && Math.abs(luminance(outline) - luminance(ink)) >= 60) return `rgba(${outline.join(",")},0.96)`;
+  return luminance(ink) < 128 ? "rgba(255,255,255,0.96)" : "rgba(15,15,15,0.9)";
+}
 
 /** Share of the band just outside the text boxes that must be balloon paper for a retouch. */
 const PLAIN_BAND = 0.75;
@@ -682,6 +781,205 @@ function restore(img: RGBAImage, s: Snapshot): void {
 }
 
 /** Union of the drawn line rectangles in page coordinates. */
+/**
+ * Layout for free text tilted or curved in the raw, in the source block's own frame (centred on
+ * it, turned by its angle; manga-image-translator warps its rendered text onto the rotated box
+ * the same way). A long text in a tilted column runs along the column. A single line on an arc
+ * follows it when the whole text fits along the arc at a size close to the straight layout.
+ * Undefined when the text does not fit that frame: the upright plan may grow into free paper.
+ */
+function planSlanted(
+  s: Slant,
+  text: string,
+  measure: (text: string, px: number) => number,
+  maxSize: number,
+): { box: LayoutArea; frame: LayoutArea; layout: TextLayout; angle: number; centre: [number, number]; arc: number | undefined; doc: DocLine[] | undefined } | undefined {
+  const fw = s.w * 1.1 + 4, fh = s.h * 1.1 + 4;
+  const docFrame: LayoutArea = { x: 0, y: 0, w: fw, h: fh, shape: "rect" };
+  const doc = s.lines && lettersOnLines(s.lines, text, measure, maxSize, fw, fh);
+  if (doc) {
+    const layout: TextLayout = {
+      fontSize: Math.min(...doc.map((d) => d.px)),
+      lineHeight: Math.max(...doc.map((d) => d.px)) * 1.16,
+      lines: doc.map((d) => ({ text: d.text, cx: d.x + d.width / 2, top: d.y - d.px * 0.58, width: d.width })),
+      overflow: false,
+    };
+    const box = rotatedBounds([s.cx, s.cy], s.angle, -fw / 2, -fh / 2, fw / 2, fh / 2);
+    return { box: { ...box, shape: "rect" }, frame: docFrame, layout, angle: s.angle, centre: [s.cx, s.cy], arc: undefined, doc };
+  }
+  // An upright block with printed lines that the text does not suit is laid out as usual.
+  if (s.angle === 0 && s.bow === undefined) return undefined;
+  let frame: LayoutArea = { x: 0, y: 0, w: fw, h: fh, shape: "rect" };
+  let along = false;
+  let layout = layoutText(text, frame, measure, { maxSize, minSize: 9 });
+  if (s.column) {
+    // A column is only lettered along itself when it is long and the text does not sit well
+    // across it (the margin-column rule); otherwise the upright plan, which may grow into free
+    // paper beside the column, reads better.
+    if (s.h < COLUMN_RATIO * s.w || !(layout.overflow || layout.lines.length >= 5)) return undefined;
+    const colFrame: LayoutArea = { x: 0, y: 0, w: fh, h: fw, shape: "rect" };
+    const alt = layoutText(text, colFrame, measure, { maxSize, minSize: 9 });
+    if (alt.overflow || alt.lines.length > 3) return undefined;
+    layout = alt;
+    frame = colFrame;
+    along = true;
+  }
+  if (layout.overflow) layout = layoutText(text, frame, measure, { maxSize, minSize: 8 });
+  // Small print on a tilted card may go a size smaller; laid out upright instead, it would cut
+  // across the card, which reads worse than slightly cramped lettering on it.
+  if (layout.overflow && s.angle !== 0) layout = layoutText(text, frame, measure, { maxSize, minSize: 7 });
+  if (layout.overflow && s.angle === 0) return undefined;
+  let arc: number | undefined;
+  if (s.bow !== undefined && (!s.column || along)) {
+    // Turning a column by another 90 degrees maps its +x bulge to -y in the drawing frame.
+    const bow = along ? -s.bow : s.bow;
+    const room = 0.95 * arcLength(frame.w, bow);
+    const line = text.replace(/\s+/g, " ").trim();
+    const ratio = layout.lineHeight / layout.fontSize;
+    for (let px = maxSize; px >= Math.max(9, Math.round(0.8 * layout.fontSize)); px--) {
+      const width = measure(line, px);
+      if (width > room) continue;
+      arc = bow;
+      layout = { fontSize: px, lineHeight: px * ratio, lines: [{ text: line, cx: frame.w / 2, top: frame.h / 2 - (px * ratio) / 2, width }], overflow: false };
+      break;
+    }
+  }
+  const angle = s.angle + (along ? Math.PI / 2 : 0);
+  const box = rotatedBounds([s.cx, s.cy], angle, -frame.w / 2, -frame.h / 2, frame.w / 2, frame.h / 2);
+  return { box: { ...box, shape: "rect" }, frame, layout, angle, centre: [s.cx, s.cy], arc, doc: undefined };
+}
+
+/** One lettered line of a card, form or letter, in its frame (top-left origin, `y` = middle). */
+interface DocLine {
+  text: string;
+  x: number;
+  y: number;
+  px: number;
+  width: number;
+}
+
+/**
+ * The Vietnamese set line by line on the printed lines of the source (manga-image-translator
+ * translates and letters each text line on its own, so a form keeps its rows): each line keeps
+ * its place, left edge and height. Line breaks the model gave are used when they match the
+ * printed lines; otherwise the words are split so every line is about as full as its source line.
+ * Undefined when the text cannot fill the lines at 0.6 of their size or is far shorter than them
+ * (then one block reads better).
+ */
+function lettersOnLines(
+  lines: NonNullable<Slant["lines"]>,
+  text: string,
+  measure: (text: string, px: number) => number,
+  maxSize: number,
+  fw: number,
+  fh: number,
+): DocLine[] | undefined {
+  const n = lines.length;
+  const base = lines.map((l) => Math.max(8, Math.min(maxSize, Math.round(0.88 * (l.v1 - l.v0)))));
+  const room = lines.map((l, k) => (k === n - 1 ? fw / 2 - l.u0 : l.u1 - l.u0));
+  const given = text.split("\n").map((p) => p.trim()).filter(Boolean);
+  let parts: string[];
+  if (given.length === n) parts = given;
+  else {
+    const words = text.replace(/\s+/g, " ").trim().split(" ");
+    if (words.length < n) return undefined;
+    // Width of words[i..j) on line k, from per-word widths at that line's size.
+    const wd = base.map((px) => words.map((w) => measure(w, px)));
+    const space = base.map((px) => measure(" ", px) || px * 0.28);
+    const width = (k: number, i: number, j: number) => {
+      let s = space[k] * (j - i - 1);
+      for (let q = i; q < j; q++) s += wd[k][q];
+      return s;
+    };
+    const natural = lines.reduce((a, _, k) => a + width(k, 0, words.length) / n, 0);
+    if (natural < 0.5 * room.reduce((a, b) => a + b, 0)) return undefined;
+    // Split minimising the fullest line (fill = width / room), every line non-empty.
+    const W = words.length;
+    const best = Array.from({ length: n + 1 }, () => new Array<number>(W + 1).fill(Infinity));
+    const cut = Array.from({ length: n + 1 }, () => new Array<number>(W + 1).fill(0));
+    best[0][0] = 0;
+    for (let k = 1; k <= n; k++)
+      for (let j = k; j <= W - (n - k); j++)
+        for (let i = k - 1; i < j; i++) {
+          if (best[k - 1][i] === Infinity) continue;
+          const v = Math.max(best[k - 1][i], width(k - 1, i, j) / room[k - 1]);
+          if (v < best[k][j]) {
+            best[k][j] = v;
+            cut[k][j] = i;
+          }
+        }
+    parts = new Array<string>(n);
+    for (let k = n, j = W; k > 0; k--) {
+      const i = cut[k][j];
+      parts[k - 1] = words.slice(i, j).join(" ");
+      j = i;
+    }
+  }
+  const fill = Math.max(...parts.map((p, k) => measure(p, base[k]) / room[k]));
+  const scale = Math.min(1, 0.98 / fill);
+  if (scale < 0.6) return undefined;
+  return parts.map((p, k) => {
+    const px = Math.max(8, Math.floor(base[k] * scale));
+    const l = lines[k];
+    return { text: p, x: fw / 2 + l.u0, y: fh / 2 + (l.v0 + l.v1) / 2, px, width: measure(p, px) };
+  });
+}
+
+/** Page bounds of the frame rectangle (u0, v0)-(u1, v1), relative to `centre`, turned by `angle`. */
+function rotatedBounds(centre: [number, number], angle: number, u0: number, v0: number, u1: number, v1: number): Box {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const pts = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]].map(([u, v]) => [centre[0] + u * c - v * s, centre[1] + u * s + v * c]);
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+}
+
+type Quad = Array<[number, number]>;
+type PlanShape = { layout: TextLayout; box: LayoutArea; frame: LayoutArea; rotated: boolean; angle?: number; centre?: [number, number]; arc?: number };
+
+/** Corners of a plan's lettering on the page, whether upright, turned along a column, tilted or on an arc. */
+function quadOf(p: PlanShape): Quad | undefined {
+  if (p.angle === undefined || !p.centre) {
+    const b = textBounds(p.layout, p.box, p.rotated);
+    return b && [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]];
+  }
+  const t =
+    p.arc !== undefined && p.layout.lines.length
+      ? { x: p.frame.w / 2 - p.layout.lines[0].width / 2, y: p.frame.h / 2 - Math.abs(p.arc) / 2 - p.layout.lineHeight / 2, w: p.layout.lines[0].width, h: Math.abs(p.arc) + p.layout.lineHeight }
+      : textBounds(p.layout, p.frame);
+  if (!t) return undefined;
+  const c = Math.cos(p.angle), s = Math.sin(p.angle);
+  const [cx, cy] = p.centre;
+  const u0 = t.x - p.frame.w / 2, v0 = t.y - p.frame.h / 2, u1 = u0 + t.w, v1 = v0 + t.h;
+  return [[u0, v0], [u1, v0], [u1, v1], [u0, v1]].map(([u, v]) => [cx + u * c - v * s, cy + u * s + v * c]);
+}
+
+function quadBounds(q: Quad): Box {
+  const xs = q.map((p) => p[0]), ys = q.map((p) => p[1]);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+}
+
+/** Do two convex quads come within `gap` px of each other? (Separating axis test on their edges.) */
+export function quadsTouch(a: Quad, b: Quad, gap: number): boolean {
+  for (const poly of [a, b])
+    for (let i = 0; i < poly.length; i++) {
+      const [x1, y1] = poly[i], [x2, y2] = poly[(i + 1) % poly.length];
+      const len = Math.hypot(x2 - x1, y2 - y1);
+      if (!len) continue;
+      const nx = (y1 - y2) / len, ny = (x2 - x1) / len;
+      const pa = a.map(([x, y]) => x * nx + y * ny), pb = b.map(([x, y]) => x * nx + y * ny);
+      if (Math.max(...pa) + gap <= Math.min(...pb) || Math.max(...pb) + gap <= Math.min(...pa)) return false;
+    }
+  return true;
+}
+
+/** Page bounds of a plan's lettering. */
+function boundsOf(p: PlanShape): Box | undefined {
+  const q = quadOf(p);
+  return q && quadBounds(q);
+}
+
 function textBounds(layout: TextLayout, box: LayoutArea, rotated?: boolean): Box | undefined {
   if (!layout.lines.length) return undefined;
   const u0 = Math.min(...layout.lines.map((l) => l.cx - l.width / 2));

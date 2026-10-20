@@ -10,6 +10,7 @@ import { INPAINT_DEVICE, INPAINT_ENGINE, LAMA_DEVICE, sessionOptions, type Inpai
 import { ROOT } from "./env";
 import type { DecodedPage } from "./image";
 import { LAMA_MODELS, loadLama, runLama, type LamaVariant } from "./lama";
+import { keepPictures, snapToPaper, textColours, wholeBoxes, withNeighbours } from "./redraw";
 
 /** andraniksargsyan/migan @ 406830d0fa60666da0071c342ad2fbc8f30c5c64, MIT (Picsart AI Research). */
 export const MIGAN_FILE = join(ROOT, "models", "inpaint", "migan_pipeline_v2.onnx");
@@ -280,8 +281,8 @@ export type Patch = PatchData;
 /** Diagnostics for a reconstruction that needed the fallback (the text is still redrawn). */
 export interface Rejected {
   id: string;
-  /** bold-text: display lettering drawn with thick strokes stays part of the art (no patch). */
-  reason: "rect-fallback" | "glyphs-survived" | "visible-patch" | "bold-text";
+  /** bold-text: display lettering drawn with thick strokes stays part of the art (no patch). boxes-cleared: the whole text boxes were redrawn as a last resort. */
+  reason: "rect-fallback" | "glyphs-survived" | "boxes-cleared" | "visible-patch" | "bold-text";
   coverage: number;
 }
 
@@ -310,28 +311,50 @@ export async function inpaintRegions(
     engine = engineFor(full, job);
     return engine === "lama" ? runLama(lama!, full, job) : runMigan(s, full, job);
   };
-  const out: Patch[] = [];
+  // First every hole, then each redraw with the others masked too (see `withNeighbours`).
+  const pending: { r: TextRegion; members: Box[]; cs?: number; job: InpaintJob; ms: number }[] = [];
   for (const r of regions) {
     const t0 = performance.now();
     const members = r.bubble ? textArea(r, cornersFlat(full, r.bubble)) : await refineTextBoxes(page, r);
     // The size guess is box area / character count: a tighter box means smaller glyphs.
     const cs = charSizes[r.id] && Math.sqrt((charSizes[r.id] ** 2 * members.reduce((a, m) => a + area(m), 0)) / area(r.box));
     const learned = pageMask ?? (masker ? await learnedTextMask(masker, full, members) : undefined);
-    let job = artTextMask(full, members, { charSize: cs, learned, grow: GROW });
+    const job = artTextMask(full, members, { charSize: cs, learned, grow: GROW });
     if (job.bold) {
       rejected.push({ id: r.id, reason: "bold-text", coverage: job.coverage });
       continue;
     }
-    let result = await redraw(job);
+    pending.push({ r, members, cs, job, ms: performance.now() - t0 });
+  }
+  const out: Patch[] = [];
+  for (const { r, members, cs, job: first, ms } of pending) {
+    const t0 = performance.now() - ms;
+    const others = pending.filter((o) => o.r !== r).map((o) => o.job);
+    const pictures: Box[] = [];
+    let job = first;
+    let masked = withNeighbours(job, others);
+    let result = await redraw(masked);
     if (job.rect) rejected.push({ id: r.id, reason: "rect-fallback", coverage: job.coverage });
     else if (residueAfter(full, result, job, members, cs) > MAX_RESIDUE_AFTER) {
       // Strokes escaped the glyph mask: reconstruct the whole text box instead (protected art stays).
       rejected.push({ id: r.id, reason: "glyphs-survived", coverage: job.coverage });
-      job = artTextMask(full, members, { charSize: cs, rect: true });
-      result = await redraw(job);
+      // A photo or portrait inside a loose box is never part of a whole-box hole.
+      job = keepPictures(full, artTextMask(full, members, { charSize: cs, rect: true }), first, cs ?? 16, pictures);
+      masked = withNeighbours(job, others);
+      result = await redraw(masked);
+      if (residueAfter(full, result, job, members, cs) > MAX_RESIDUE_AFTER) {
+        // Still ink left: bold strokes were kept as filled shapes. Redraw the glyph-sized ones too.
+        rejected.push({ id: r.id, reason: "boxes-cleared", coverage: job.coverage });
+        pictures.length = 0;
+        job = keepPictures(full, wholeBoxes(job, members, cs ?? 16), first, cs ?? 16, pictures);
+        masked = withNeighbours(job, others);
+        result = await redraw(masked);
+      }
     } else if (!patchBlends(full, result, job).ok) {
       rejected.push({ id: r.id, reason: "visible-patch", coverage: job.coverage });
     }
+    snapToPaper(full, result, job, masked);
+    const colours = textColours(full, first, members, GROW(cs ?? 16));
     const { x, y, w, h } = job.crop;
     const n = w * h;
     const canvas = createCanvas(w, h);
@@ -351,7 +374,7 @@ export async function inpaintRegions(
     }
     ctx.putImageData(patch, 0, 0);
     const png = await canvas.encode("png");
-    out.push({ id: r.id, x, y, w, h, dataUrl: `data:image/png;base64,${png.toString("base64")}`, coverage: job.coverage, ms: Math.round(performance.now() - t0), textBoxes: members, textExtent: job.extent, engine: engine as Patch["engine"] }); // "aot" is a diagnostic label PatchData does not list yet
+    out.push({ id: r.id, x, y, w, h, dataUrl: `data:image/png;base64,${png.toString("base64")}`, coverage: job.coverage, ms: Math.round(performance.now() - t0), textBoxes: members, textExtent: job.extent, ...colours, keepOut: pictures.length ? pictures : undefined, engine: engine as Patch["engine"] }); // "aot" is a diagnostic label PatchData does not list yet
   }
   return out;
 }

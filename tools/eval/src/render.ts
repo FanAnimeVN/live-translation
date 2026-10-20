@@ -12,7 +12,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createCanvas, GlobalFonts, loadImage } from "@napi-rs/canvas";
 import { expand, intersect, type Box, type PageResult } from "@lt/core";
-import { LETTERING_FONT, MAX_RESIDUE, renderTranslation, type Ctx2D, type PatchImage, type RegionRender } from "@lt/render";
+import { LETTERING_FONT, MAX_RESIDUE, quadsTouch, renderTranslation, type Ctx2D, type PatchImage, type RegionRender } from "@lt/render";
 import { charSizesFor, decodeImage, getPage, INPAINT_DEVICE, INPAINT_ENGINE, inpaintRegions, listPages, loadResult, PRIVATE_DIR, readPageImage, ROOT, warmInpainters } from "@lt/server";
 import type { Rejected } from "../../../apps/server/src/inpaint";
 
@@ -77,7 +77,7 @@ for (const page of pages) {
     inpaintMs = Math.round(performance.now() - t0);
     const images: Record<string, PatchImage> = {};
     for (const p of patches) engines[p.engine ?? "migan"] = (engines[p.engine ?? "migan"] ?? 0) + 1;
-    for (const p of patches) images[p.id] = { x: p.x, y: p.y, image: await loadImage(Buffer.from(p.dataUrl.split(",")[1], "base64")), textBoxes: p.textBoxes, textExtent: p.textExtent };
+    for (const p of patches) images[p.id] = { x: p.x, y: p.y, image: await loadImage(Buffer.from(p.dataUrl.split(",")[1], "base64")), textBoxes: p.textBoxes, textExtent: p.textExtent, ink: p.ink, outline: p.outline, keepOut: p.keepOut };
     rctx.drawImage(d.canvas, 0, 0);
     const keep = new Set(rejected.filter((x) => x.reason === "bold-text").map((x) => x.id));
     renders = renderTranslation(rctx as unknown as Ctx2D, { w: d.w, h: d.h }, result.regions, result.translations, { patches: images, keep });
@@ -133,7 +133,10 @@ function score(pageId: string, result: PageResult, renders: RegionRender[], inpa
   const overlaps: string[] = [];
   for (let i = 0; i < lettered.length; i++) {
     for (let j = i + 1; j < lettered.length; j++) {
-      if (overlapArea(lettered[i].textBox!, lettered[j].textBox!) > 16) overlaps.push(`${lettered[i].id}+${lettered[j].id}`);
+      const [a, b] = [lettered[i], lettered[j]];
+      // Tilted lettering is compared as drawn: overlapping by more than 2 px.
+      const hit = a.textQuad && b.textQuad && (a.angle !== undefined || b.angle !== undefined) ? quadsTouch(a.textQuad, b.textQuad, -2) : overlapArea(a.textBox!, b.textBox!) > 16;
+      if (hit) overlaps.push(`${a.id}+${b.id}`);
     }
   }
   const overUnerased: string[] = [];
