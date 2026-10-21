@@ -131,3 +131,17 @@ label.button.primary { background: var(--accent); color: var(--accent-ink); bord
 .invite input { flex: 1; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: inherit; }
 .invite .error { color: #d14; margin: 0; }
 .invite .fine { color: var(--muted); font-size: 12px; }
+
+/* Phones and narrow windows: one column, the page full width, the page list and the panel below it. */
+@media (max-width: 760px) {
+  .app { display: flex; flex-direction: column; height: auto; min-height: 100vh; }
+  header { gap: 6px 10px; padding: 6px 10px; font-size: 13px; }
+  header label { display: inline-flex; align-items: center; gap: 4px; }
+  header select { max-width: 62vw; }
+  .budget { margin-left: 0; width: 100%; }
+  main { order: 1; padding: 6px 0; overflow: visible; }
+  .stage { height: auto; width: 100%; }
+  .stage canvas { width: 100%; height: auto; }
+  .pages { order: 2; border-right: none; border-top: 1px solid var(--line); max-height: 40vh; }
+  .panel { order: 3; border-left: none; border-top: 1px solid var(--line); max-height: 70vh; }
+}
