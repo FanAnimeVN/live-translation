@@ -174,6 +174,7 @@ if ROLE == "board":
 # ---------------------------------------------------------------- train (GPU 0)
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoImageProcessor, AutoTokenizer, VisionEncoderDecoderModel, get_linear_schedule_with_warmup
+from transformers.models.vision_encoder_decoder.modeling_vision_encoder_decoder import shift_tokens_right
 
 BASE, EPOCHS, BATCH, LR, MAX_LABEL = "kha-white/manga-ocr-base", 2, 48, 5e-5, 96
 TIME_LIMIT_S = 7 * 3600
@@ -219,8 +220,13 @@ step = 0
 for epoch in range(EPOCHS):
     model.train()
     for px, lab in loader:
+        # transformers 4.57's VisionEncoderDecoderModel loss shifts the labels once more (causal-LM style): the
+        # model then learns the token after next and generation reorders characters (debug-train.py). Own loss:
+        lab = lab.to("cuda")
+        dec_in = shift_tokens_right(lab, model.config.pad_token_id, model.config.decoder_start_token_id)
         with torch.autocast("cuda", dtype=torch.float16):
-            loss = model(pixel_values=px.to("cuda"), labels=lab.to("cuda")).loss
+            logits = model(pixel_values=px.to("cuda"), decoder_input_ids=dec_in).logits
+        loss = torch.nn.functional.cross_entropy(logits.float().reshape(-1, logits.size(-1)), lab.reshape(-1), ignore_index=-100)
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)

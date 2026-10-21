@@ -151,11 +151,16 @@
 1. Ô SFX (29% dữ liệu) thường xoay hoặc uốn cong nhưng chỉ được cắt theo hộp bao thẳng, nên thứ tự ký tự trong ảnh không nhất quán.
 2. Learning rate quá cao làm hỏng decoder.
 
-**Đang chạy thí nghiệm tách hai nghi vấn** (`tools/kaggle/ocr-ablate.py`, 2 GPU song song):
-- chỉ chữ thoại, so với chữ thoại cộng SFX;
-- cả hai dùng lr 2e-5, chấm điểm sau mỗi 500 bước.
+**Thí nghiệm tách nghi vấn** (`tools/kaggle/ocr-ablate.py`, 2 GPU, lr 2e-5): cả bản chỉ chữ thoại lẫn bản thêm SFX đều hỏng ngay sau 500 bước (CER chữ thoại từ 8,8% lên khoảng 47%). Vậy nguyên nhân không phải SFX, cũng không phải learning rate.
 
-**Bài học cho báo cáo:** loss khi train không đủ để đánh giá OCR, phải chấm bằng cách cho model tự sinh chữ trong lúc train. Sản phẩm vẫn dùng Baberu chưa fine-tune.
+**Nguyên nhân thật** (`tools/kaggle/debug-train.py`): trong `transformers` 4.57, loss có sẵn của `VisionEncoderDecoderModel` dịch nhãn thêm một vị trí, như loss của mô hình ngôn ngữ thông thường. Model vì thế học đoán token *sau token kế tiếp*.
+- **Bằng chứng:** model gốc đoán đúng 95% token khi được mớm đáp án mà loss lại là 14,7.
+- **Học thuộc một batch, loss có sẵn:** độ chính xác khi mớm đáp án rơi về 16%, sinh lại đúng 0/16 dòng.
+- **Học thuộc một batch, loss tự tính** (logit ở vị trí t so với nhãn ở vị trí t): độ chính xác 100%, sinh lại đúng 11/16 dòng; 5 dòng còn lại dài hơn giới hạn 40 token khi thử.
+
+**Đã sửa ở cả ba script train.** Lượt v2 đang chạy: fine-tune trên 72 bộ Manga109-s, kèm bảng xếp hạng OCR không rò rỉ.
+
+**Bài học cho báo cáo:** loss khi train không đủ để đánh giá OCR. Phải cho model tự sinh chữ trong lúc train, và phải thử học thuộc một batch trước khi chạy dài. Sản phẩm vẫn dùng Baberu chưa fine-tune.
 
 ## 6. Hướng đề xuất (chờ nhóm chốt)
 

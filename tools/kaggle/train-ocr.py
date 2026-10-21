@@ -20,6 +20,7 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoImageProcessor, AutoTokenizer, VisionEncoderDecoderModel, get_linear_schedule_with_warmup
+from transformers.models.vision_encoder_decoder.modeling_vision_encoder_decoder import shift_tokens_right
 
 BASE = "kha-white/manga-ocr-base"
 OUT = "/kaggle/working/ocr"
@@ -179,8 +180,14 @@ scaler = torch.amp.GradScaler("cuda")
 step, stopped = 0, False
 for epoch in range(EPOCHS):
     for px, lab in loader:
+        # transformers 4.57's VisionEncoderDecoderModel loss shifts the labels once more (causal-LM style), so the
+        # model learns to predict the token after next: characters come out reordered or dropped (tools/kaggle/
+        # debug-train.py: base model 'loss' 14.7 at 95% token accuracy). The loss is computed here instead.
+        lab = lab.to("cuda")
+        dec_in = shift_tokens_right(lab, model.config.pad_token_id, model.config.decoder_start_token_id)
         with torch.autocast("cuda", dtype=torch.float16):
-            loss = model(pixel_values=px.to("cuda"), labels=lab.to("cuda")).loss
+            logits = model(pixel_values=px.to("cuda"), decoder_input_ids=dec_in).logits
+        loss = torch.nn.functional.cross_entropy(logits.float().reshape(-1, logits.size(-1)), lab.reshape(-1), ignore_index=-100)
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
