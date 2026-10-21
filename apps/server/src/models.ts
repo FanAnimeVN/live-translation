@@ -15,7 +15,14 @@ export interface ModelInfo {
    * 58% of characters wrong vs 26% on InferenceNet), so the cheapest is not always the same model.
    */
   provider?: Record<string, unknown>;
+  /** The id sent to the provider when `id` names a variant (e.g. "…@high" for another reasoning effort). */
+  apiId?: string;
+  /** Measurement variants: not offered in the reader's model menu. */
+  hidden?: boolean;
 }
+
+/** The same model at another reasoning effort, for sweeps (tools/eval/src/bakeoff.ts). */
+const effort = (m: ModelInfo, e: "low" | "medium" | "high"): ModelInfo => ({ ...m, id: `${m.id}@${e}`, apiId: m.id, label: `${m.label} · effort ${e}`, extra: { ...m.extra, reasoning: { effort: e } }, hidden: true });
 
 export const MODELS: ModelInfo[] = [
   { id: "anthropic/claude-haiku-5.5", label: "Claude Haiku 5.5 (mặc định)", tier: "fast", inUsd: 0.1, outUsd: 0.5, noSampling: true, extra: { reasoning: { enabled: false } } },
@@ -34,6 +41,8 @@ export const MODELS: ModelInfo[] = [
   { id: "qwen/qwen3.8-omni-flash", label: "Qwen3.8-Omni-Flash", tier: "cheap", inUsd: 0.15, outUsd: 0.47, extra: { reasoning: { enabled: false } } },
   { id: "google/gemini-3.8-flash", label: "Gemini 3.8 Flash", tier: "quality", inUsd: 0.825, outUsd: 4.125, extra: { reasoning: { effort: "low" } } },
   { id: "google/gemma-4-26b-a4b-it:free", label: "Gemma 4 26B (free)", tier: "free", inUsd: 0, outUsd: 0 },
+  // Released 2026-10-19; free on OpenRouter for now, Ollama cloud lists $0.15 in / $0.015 cached / $0.60 out.
+  { id: "minimax/minimax-m3.1-flash:free", label: "MiniMax M3.1 Flash (free, thử nghiệm)", tier: "free", inUsd: 0, outUsd: 0, extra: { reasoning: { effort: "low" } } },
   { id: "mock/sample", label: "Mock (offline, bản dịch giả để thử dàn chữ)", tier: "free", inUsd: 0, outUsd: 0 },
   // On the reader's own machine through Ollama or LM Studio (LOCAL_LLM_URL, localhost only): no
   // credits, nothing leaves the computer. Tags are Ollama's; candidates for a 16 GB RAM machine.
@@ -42,6 +51,17 @@ export const MODELS: ModelInfo[] = [
   { id: "local/qwen3-vl:4b-instruct", label: "Qwen3-VL 4B (máy bạn, offline · 3.3 GB)", tier: "local", inUsd: 0, outUsd: 0 },
   { id: "local/gemma4:e2b", label: "Gemma 4 E2B (máy bạn, offline · 4.6 GB)", tier: "local", inUsd: 0, outUsd: 0 },
 ];
+// Ollama cloud (signed-in local daemon, free until 2026-10-22 23:59 UTC; list $0.15 / $0.015 cached / $0.60 per 1M).
+// Hidden: needs `ollama signin`, and it is a cloud service, not the offline mode.
+MODELS.push(
+  { id: "ollama-cloud/minimax-m3.1-flash:cloud", label: "MiniMax M3.1 Flash (Ollama cloud)", tier: "cheap", inUsd: 0.15, outUsd: 0.6, hidden: true },
+  { id: "ollama-cloud/minimax-m3.1-flash:cloud@low", apiId: "ollama-cloud/minimax-m3.1-flash:cloud", label: "MiniMax M3.1 Flash (Ollama cloud) · effort low", tier: "cheap", inUsd: 0.15, outUsd: 0.6, extra: { reasoning_effort: "low", max_tokens: 16000 }, hidden: true },
+);
+// Reasoning-effort sweep (2026-10-21): DeepSeek runs with reasoning off by default; MiniMax requires it.
+for (const id of ["deepseek/deepseek-v4.1-flash-1017", "minimax/minimax-m3.1-flash:free"]) {
+  const base = MODELS.find((m) => m.id === id)!;
+  for (const e of ["low", "medium", "high"] as const) if (!(id.startsWith("minimax") && e === "low")) MODELS.push(effort(base, e));
+}
 
 /**
  * Default reader/translator (2026-10-19, price first, then accuracy and speed): Haiku 5.5.

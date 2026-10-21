@@ -34,6 +34,13 @@ export const env = {
   port: Number(process.env.PORT ?? "8787"),
   /** OpenAI-compatible endpoint of a local model server: Ollama (default) or LM Studio (:1234/v1). */
   localLlmUrl: process.env.LOCAL_LLM_URL ?? "http://127.0.0.1:11434/v1",
+  /**
+   * Context size asked of Ollama for local models. A page request (prompt v5 + page image + crops) is
+   * 5–9k tokens, and Ollama's default (4,096 below 24 GB of VRAM) rejects it: "request exceeds the
+   * available context size". Its OpenAI-compatible endpoint cannot change this, so local Ollama calls
+   * use the native API with this value.
+   */
+  localNumCtx: Number(process.env.LOCAL_NUM_CTX ?? "16384"),
 };
 
 /** Offline mode never calls a non-localhost host: only these hosts are accepted for local models. */

@@ -43,20 +43,41 @@ export async function streamChat(opts: {
   // "local/<name>": a model served on this machine (Ollama, LM Studio). No key, no credits,
   // and never a request to another host.
   const local = opts.model.startsWith("local/");
-  if (!local && !env.openrouterKey) throw new ProviderError("OPENROUTER_API_KEY is missing in .env.local", 401, "no-key");
-  if (!local) await assertBudget(estimateUsd(opts.model));
+  // "ollama-cloud/<tag>": Ollama's hosted models through the signed-in local daemon. A cloud
+  // service (pages leave the machine), measured like the others; never part of offline mode.
+  const ollamaCloud = opts.model.startsWith("ollama-cloud/");
+  // Ollama ":cloud" tags answer through the local daemon but run on Ollama's servers: never offline.
+  if (local && /[:-]cloud$/.test(opts.model))
+    throw new ProviderError(`${opts.model} runs on Ollama's cloud, not on this machine: offline mode never sends pages to another host`, 400, "not-local");
+  if (!local && !ollamaCloud && !env.openrouterKey) throw new ProviderError("OPENROUTER_API_KEY is missing in .env.local", 401, "no-key");
+  if (!local && !ollamaCloud) await assertBudget(estimateUsd(opts.model));
   const info = modelInfo(opts.model);
+  // Local Ollama (its default port): native chat API, the only one that can raise the context size.
+  const ollamaNative = local && new URL(env.localLlmUrl).port === "11434";
   // Explicit cache breakpoints for providers that need them (Anthropic, Gemini);
   // DeepSeek, GLM and Qwen cache identical prefixes automatically.
   const explicitCache = /^(anthropic|google)\//.test(opts.model);
   const cacheMark = explicitCache ? { cache_control: { type: "ephemeral" } } : {};
-  const body = local
+  const body = ollamaNative
     ? {
         model: opts.model.slice("local/".length),
+        stream: true,
+        options: { temperature: 0.2, num_ctx: env.localNumCtx, num_predict: opts.maxTokens ?? 6000 },
+        // Content parts become consecutive messages in order, as Ollama's OpenAI endpoint does itself.
+        messages: [
+          ...(opts.system ? [{ role: "system", content: opts.system }] : []),
+          ...opts.parts.map((p) => (p.type === "text" ? { role: "user", content: p.text } : { role: "user", content: "", images: [p.dataUrl.slice(p.dataUrl.indexOf(",") + 1)] })),
+        ],
+      }
+    : local || ollamaCloud
+    ? {
+        model: (info.apiId ?? opts.model).slice(opts.model.indexOf("/") + 1),
         stream: true,
         stream_options: { include_usage: true },
         max_tokens: opts.maxTokens ?? 6000,
         temperature: 0.2,
+        // Model fields (reasoning effort, a larger cap for thinking models) after the defaults.
+        ...(ollamaCloud ? info.extra : {}),
         messages: [
           // Translation-only models (Hy-MT2) take their instruction in the user turn, no system prompt.
           ...(opts.system ? [{ role: "system", content: opts.system }] : []),
@@ -64,7 +85,7 @@ export async function streamChat(opts: {
         ],
       }
     : {
-        model: opts.model,
+        model: info.apiId ?? opts.model,
         stream: true,
         max_tokens: opts.maxTokens ?? 6000,
         ...(info.noSampling ? {} : { temperature: 0.2 }),
@@ -96,8 +117,8 @@ export async function streamChat(opts: {
     let res: Response;
     for (let attempt = 0; ; attempt++) {
       try {
-        res = local
-          ? await fetch(new URL("chat/completions", assertLocalUrl(env.localLlmUrl.replace(/\/?$/, "/"))), {
+        res = local || ollamaCloud
+          ? await fetch(ollamaNative ? new URL("/api/chat", assertLocalUrl(env.localLlmUrl)) : new URL("chat/completions", assertLocalUrl(env.localLlmUrl.replace(/\/?$/, "/"))), {
               method: "POST",
               signal: opts.signal,
               headers: { "Content-Type": "application/json" },
@@ -123,7 +144,7 @@ export async function streamChat(opts: {
     }
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
-      throw new ProviderError(`${local ? "Local model server" : "OpenRouter"} ${res.status}: ${text.slice(0, 400)}`, res.status, statusCode(res.status));
+      throw new ProviderError(`${local ? "Local model server" : ollamaCloud ? "Ollama cloud" : "OpenRouter"} ${res.status}: ${text.slice(0, 400)}`, res.status, statusCode(res.status));
     }
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = "";
@@ -136,6 +157,25 @@ export async function streamChat(opts: {
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
+        if (ollamaNative) {
+          // Native Ollama stream: one JSON object per line.
+          if (!line) continue;
+          let c: any;
+          try {
+            c = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (c.error) throw new ProviderError(`Local model server: ${c.error}`, 400, "provider");
+          const delta = c.message?.content;
+          if (typeof delta === "string" && delta) opts.onText(delta);
+          if (c.done) {
+            stats.finishReason = c.done_reason;
+            stats.promptTokens = c.prompt_eval_count;
+            stats.completionTokens = c.eval_count;
+          }
+          continue;
+        }
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
         if (data === "[DONE]") continue;

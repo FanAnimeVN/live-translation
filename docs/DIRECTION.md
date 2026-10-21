@@ -285,5 +285,5 @@ npm run server      # mở http://127.0.0.1:8787
 ```
 
 Cần `.env.local` (không commit) gồm `OPENROUTER_API_KEY`, `DATASET_DIR` và `DETECTOR_MODEL`; xem `.env.example`.
-Tùy chọn: `INPAINT_DEVICE=dml` (vẽ lại trên GPU Windows), `INPAINT_ENGINE=auto|migan|lama`, `LOCAL_LLM_URL` (mặc định Ollama `http://127.0.0.1:11434/v1`, chỉ chấp nhận localhost).
+Tùy chọn: `INPAINT_DEVICE=dml` (vẽ lại trên GPU Windows), `INPAINT_ENGINE=auto|migan|lama`, `LOCAL_LLM_URL` (mặc định Ollama `http://127.0.0.1:11434/v1`, chỉ chấp nhận localhost), `LOCAL_NUM_CTX` (ngữ cảnh xin Ollama, mặc định 16384: một trang cần 5–9 nghìn token, mặc định 4096 của Ollama từ chối).
 Kiểm tra: `npm run check`, đo tìm vùng: `npm run detect`, so sánh model: `npm run eval`.

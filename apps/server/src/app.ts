@@ -69,7 +69,7 @@ app.get("/fonts/:name", async (c) => {
 
 app.get("/api/health", (c) => c.json({ ok: true }));
 
-app.get("/api/models", (c) => c.json({ models: MODELS, default: DEFAULT_MODEL }));
+app.get("/api/models", (c) => c.json({ models: MODELS.filter((m) => !m.hidden), default: DEFAULT_MODEL }));
 
 app.get("/api/budget", async (c) => c.json({ spentUsd: await spentUsd(), limitUsd: env.budgetUsd }));
 

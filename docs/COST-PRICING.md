@@ -204,3 +204,57 @@ So sánh: bộ 49k/2.000 + 99k/8.000 (nhiều trang hơn cho gói rẻ) chỉ l�
 3. Đo model mở đọc ảnh (Qwen3-VL 8B…) trên GPU: chất lượng (chấm mù) và trang/giây. Đây là điều kiện để tiến tới "gần như 0 đ".
 4. Đo CPU/RAM máy chủ thật cho tìm vùng và vẽ lại (mobile), cộng vào giá vốn.
 5. Beta 20–30 người đọc để đo phân bố trang/tháng thật, rồi chốt ngưỡng và giá.
+
+## 9. Thử model mới, mức "suy nghĩ" và gói thuê bao (21/10)
+
+### 9.1 Quét mức suy nghĩ (25 trang đôi của nhóm, 419 bóng)
+
+Điều kiện chung: prompt v5, tắt detector thứ hai (giống gói trả phí), mỗi cấu hình chạy 1 lượt, sáng 21/10 (giờ UTC). Giới hạn 6.000 token đầu ra mỗi trang.
+
+| Cấu hình | Lỗi đọc chữ (CER) | chrF so với bản chuẩn | Bóng đầu p50 | Cả trang p50 | $/trang đôi |
+|---|---|---|---|---|---|
+| Claude Haiku 5.5 (mặc định) | **14,4%** | 38,2 | 8,8 s | 14,0 s | $0,00143 |
+| DeepSeek V4.1 Flash 1017, tắt suy nghĩ | 20,5% | **38,5** | **4,2 s** | **9,3 s** | **$0,00109** |
+| DeepSeek 1017, suy nghĩ mức thấp | — | — | 18,4 s | 29,4 s | $0,00313 |
+| MiniMax M3.1 Flash, mức thấp (OpenRouter, bản free) | 27,1% | 28,9 | 37,9 s | 45,4 s | $0 hôm nay (giá niêm yết ≈ $0,003) |
+
+**DeepSeek bật suy nghĩ:**
+- Mức thấp: **18/25 trang không ra bản dịch**, vì phần suy nghĩ dùng hết 6.000 token. Chỉ 92/481 ô được dịch.
+- Mức vừa (12 trang thì dừng): tương tự, khoảng $0,003/trang.
+- Nới giới hạn token cũng không cứu được. Trang sẽ tốn gấp 3–6 lần và chậm gấp 4 lần, tức thua Haiku cả về giá lẫn tốc độ.
+- **Điểm ngọt của DeepSeek vẫn là tắt suy nghĩ.**
+
+**MiniMax M3.1 Flash (ra 19/10):**
+- Model này bắt buộc suy nghĩ.
+- Qua OpenRouter: đọc và dịch kém hơn rõ rệt (chrF 28,9 so với khoảng 38). Bản free lại chậm (38 s mới có bóng đầu).
+- Qua Ollama cloud (máy đã đăng nhập): suy nghĩ hết 6.000 token, rồi hết cả 16.000 token, mà không ra bản dịch nào (70–169 s một trang). Tham số mức suy nghĩ dường như không có tác dụng.
+- Với giá niêm yết $0,15/$0,60, mỗi trang khoảng $0,003, đắt gấp đôi Haiku. **Không dùng.**
+
+**Haiku chậm hơn số đo ngày 19/10** (8,8 s so với 5,5 s), dù prompt chỉ dài hơn khoảng 15%. Có thể do nhà cung cấp lúc đo. Chất lượng vẫn ổn định: CER 14,4%, chrF 38,2.
+
+**Hướng tìm điểm ngọt tiếp (chưa đo):** chia việc theo trang.
+- DeepSeek tắt suy nghĩ làm mặc định nhanh và rẻ.
+- Chỉ những trang khó (nhiều chữ nhỏ, chữ viết tay, nhiều ô bị đọc lỗi) mới chuyển sang Haiku.
+- Cách này nhắm lấy độ đọc đúng của Haiku với giá và tốc độ gần DeepSeek.
+
+**Chặn rủi ro:** model Ollama có đuôi `:cloud` gọi qua localhost nhưng thực ra chạy trên máy chủ Ollama, nên giờ bị từ chối trong chế độ offline. Ollama cloud có đường gọi riêng `ollama-cloud/…`, được ghi rõ là dịch vụ cloud.
+
+### 9.2 Gói thuê bao có API key thay vì mua API trực tiếp?
+
+| Nhà cung cấp | Gói | Có gì | Vướng ở đâu |
+|---|---|---|---|
+| Ollama | Pro $20/tháng → $60 tín dụng; Max $100 → $300; Team $500 → $1.000 | API key, endpoint tương thích chuẩn OpenAI; cam kết không ghi log, không huấn luyện; giá rẻ hơn ngoài giờ cao điểm (12–18 UTC ngày thường) | Chỉ có model mở, không có Haiku. Pro chỉ 3 yêu cầu đồng thời. Khung 12–18 UTC lại đúng 19–01 giờ Việt Nam, giờ người Việt đọc truyện nhiều nhất. Điều khoản không nói rõ chuyện dùng làm nền cho sản phẩm bán cho người khác (cấm "truy cập tự động khi chưa được phép"), cần hỏi hello@ollama.com |
+| NanoGPT | $12/tháng, 60 triệu token đầu vào/tuần | Model mở | Không có Claude/Gemini; chưa rõ có model đọc ảnh |
+| Synthetic | $20–60/tháng, giới hạn số yêu cầu mỗi 5 giờ | Không huấn luyện, xóa dữ liệu sau 14 ngày | Chủ yếu model chỉ đọc chữ |
+| Chutes | $3–20/tháng | Mạng suy luận phi tập trung | Hạn mức không công bố |
+| Gói "coding" (GLM, MiniMax, Kimi, Qwen) | $3–168/tháng | Rẻ | Điều khoản chỉ cho dùng trong công cụ lập trình (Z.ai ghi rõ), không dùng làm nền cho app được |
+
+**Kết luận:**
+- Gói thuê bao chỉ đáng khi có một model mở trên đó dịch tốt ngang Haiku. Đến nay chưa có model nào như vậy.
+- Gói thuê bao được thiết kế cho một người dùng tương tác, nên có giới hạn đồng thời và theo khung giờ, không hợp để phục vụ nhiều người đọc.
+- Đường giảm chi phí chắc chắn hơn khi mở rộng:
+  - Batch API −50% cho "dịch sẵn chương kế" (§3);
+  - cache prompt;
+  - tín dụng khởi nghiệp của các hãng;
+  - khi đủ lớn thì tự thuê GPU chạy model mở (§7).
+- **Ollama Pro $20 vẫn hợp cho giai đoạn beta:** thử nhanh nhiều model mở mà không phải nạp tiền từng nơi.
