@@ -104,7 +104,15 @@
 
 **Nhận xét:**
 - **Detector là khâu yếu hơn OCR, nhưng chỉ ở 3,6% số bóng bị bỏ sót.** Khi detector bao đúng thì OCR gần bằng lúc cắt theo hộp nhãn.
-- **Nên bật lại detector thứ hai (CTD):** đo trước đây cho thấy nó tìm lại được 17/32 ô bị sót. Điều khoản Manga109-s cho dùng thương mại kèm ghi nguồn, nên bảng giấy phép để nó ở mức "credit".
+- **Bật detector thứ hai (CTD) giảm một nửa số bóng bị sót** (`tools/eval/src/det-coverage.ts`, 60 trang, 946 nhãn):
+
+  | | Bị sót | Bị gộp | Thời gian dò/trang |
+  |---|---|---|---|
+  | Chỉ detector chính | 34 (3,6%) | 36 (3,8%) | 1,10 s |
+  | Detector chính + CTD | **18 (1,9%)** | 40 (4,2%) | 1,21 s |
+
+- **CTD được dùng ở gói trả phí:** điều khoản Manga109-s cho dùng thương mại kèm ghi nguồn, nên bảng giấy phép để CTD ở mức "credit". Server vẫn bật CTD khi máy có GPU.
+- **Các số đo trong tài liệu này chạy với CTD tắt,** nên sản phẩm thật (CTD bật) sót ít chữ hơn.
 - **Số tự công bố cao hơn thực tế:** benchmark của tác giả các model này ghi CER 1,5–5%, nhưng trên nhãn của nhóm là 6–9%. Một phần là vì nhãn của nhóm cũng có lỗi đã biết ([private-ground-truth-audit.md](reference/private-ground-truth-audit.md)).
 
 ## 4. Model đọc ảnh chạy local (nguyên trang)
