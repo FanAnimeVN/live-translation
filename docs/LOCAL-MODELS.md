@@ -162,6 +162,38 @@
 
 **Bài học cho báo cáo:** loss khi train không đủ để đánh giá OCR. Phải cho model tự sinh chữ trong lúc train, và phải thử học thuộc một batch trước khi chạy dài. Sản phẩm vẫn dùng Baberu chưa fine-tune.
 
+## 5c. Bảng xếp hạng OCR không rò rỉ (22/10, `tools/kaggle/ocr-v2.py`)
+
+**Cách chấm:**
+- **"clean":** 22 bộ chỉ có trong Manga109 bản học thuật. Không model nào train trên Manga109-s từng thấy chúng (danh sách: `tools/kaggle/manga109s-titles.json`). Lấy mẫu 3.000 ô chữ thoại và 2.000 ô SFX.
+- **"val":** 10 bộ thuộc Manga109-s; các model khác có thể đã train trên đây.
+- **"team25":** 25 trang của nhóm, cũng thuộc Manga109-s.
+- Mỗi ô ghi CER / tỉ lệ đúng cả dòng. Thời gian đo bằng PyTorch trên T4.
+
+| Model | clean, chữ thoại | clean, SFX | val, chữ thoại | val, SFX | team25 | ms/ô |
+|---|---|---|---|---|---|---|
+| **Baberu v1.2** (Apache-2.0) | **4,4% / 80%** | 31,4% / 61% | **2,6% / 87%** | 39,1% / 56% | 6,3% / 80% | 167 |
+| Hayai v2.5 Nova (Apache-2.0) | 4,6% / 80% | 32,9% / 58% | 2,9% / 87% | 41,1% / 52% | 8,3% / 82% | 13 |
+| Hayai v2 (Apache-2.0) | 4,7% / 78% | 32,9% / 60% | 3,1% / 86% | **35,8% / 58%** | 6,4% / 80% | 32 |
+| CPT-flex (không thương mại) | 5,3% / 78% | 45,4% / 56% | 5,8% / 76% | 48,7% / 50% | 9,8% / 73% | 9 |
+| manga-ocr (Apache-2.0) | 6,2% / 73% | 70,8% / 28% | 6,2% / 71% | 81,7% / 24% | 10,0% / 68% | 120 |
+| **Nhóm tự fine-tune:** manga-ocr-base trên 61 bộ Manga109-s, chữ thoại + SFX, 2 vòng (4.938 bước) | 6,5% / 74% | **31,2% / 60%** | 7,5% / 71% | 36,8% / 54% | 10,1% / 70% | 15 |
+
+Trên 25 trang của nhóm, cắt theo hộp nhãn (`eval-ocr.py`):
+- **PaddleOCR-VL-For-Manga** đúng cả dòng nhiều nhất (84%, CER 5,1%), và đọc vùng detector tốt nhất (10,6%). Nhưng nó mất **4,4 s mỗi ô**, và SFX sai tới 62%.
+- **Hayai v2.5 ở 512 patch:** CER 5,6%.
+
+**Đọc kết quả:**
+- **Baberu đọc chữ thoại đúng nhất trên bộ không rò rỉ,** nên giữ làm OCR của sản phẩm. Nó còn có bản ONNX chạy trong server, trình duyệt và điện thoại.
+- **Hayai nhanh hơn 5–13 lần** với chất lượng gần bằng, nhưng chỉ có code PyTorch (`trust_remote_code`), chưa có ONNX.
+- **Fine-tune của nhóm chạy đúng sau khi sửa loss:**
+  - SFX giảm từ 69,7% xuống **31,2%**, ngang Baberu;
+  - chữ thoại gần như giữ nguyên;
+  - muốn vượt Baberu ở chữ thoại thì nên fine-tune chính Baberu (repo có sẵn `train_ocr.py`), không phải manga-ocr-base.
+- **Giấy phép:**
+  - model nhóm train trên các bộ Manga109-s được ghi "review" trong bảng giấy phép, vì ảnh cắt lấy từ bản Manga109 học thuật (ảnh giống hệt);
+  - cắt lại từ chính bản Manga109-s thì đổi được sang "credit".
+
 ## 6. Hướng đề xuất (chờ nhóm chốt)
 
 1. **Cloud chuyển sang "OCR trước":**

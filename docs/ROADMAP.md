@@ -33,7 +33,9 @@ Tài liệu này gom các quyết định rút ra từ số đo ngày 21–22/10
 
 1. **"OCR trước" so với "VLM đọc ảnh":** bảng chi phí, độ trễ, CER, chrF, độ đúng xưng hô cho ba cách gửi. Đã có số chi phí, độ trễ, CER, chrF; độ đúng xưng hô đang đo.
 2. **Bộ nhớ xưng hô có hướng và thẻ "Ai là ai?":** người đọc khóa thông tin, model chỉ được đề xuất. Đo độ đúng cặp xưng hô (PCA) trên nhãn của nhóm.
-3. **OCR fine-tune có SFX:**
+3. **OCR fine-tune có SFX** (bảng xếp hạng không rò rỉ: [LOCAL-MODELS.md §5c](LOCAL-MODELS.md)):
+   - đã sửa lỗi loss của `transformers` 4.57 khiến mọi fine-tune `VisionEncoderDecoder` âm thầm hỏng; đây là kết quả đáng đưa vào báo cáo;
+   - sau khi sửa, fine-tune kéo SFX từ 69,7% xuống 31,2% CER;
    - model gốc sai 70–78% ở SFX, nên đây là chỗ train thêm có lợi nhất;
    - đánh giá **không rò rỉ** trên 22 bộ chỉ có trong Manga109 bản học thuật, vì mọi model train trên Manga109-s đều chưa thấy chúng;
    - 5 bộ test của nhóm đều thuộc Manga109-s, nên điểm của các model train trên Manga109-s đo trên 5 bộ này có thể bị thổi cao.
