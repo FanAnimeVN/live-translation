@@ -155,6 +155,8 @@ export interface PageTimings {
   ttfbMs?: number;
   /** From the start of the page job to the first finished region. */
   firstRegionMs?: number;
+  /** Crop OCR of every region before the model call ("OCR first" reading). */
+  ocrMs?: number;
   totalMs: number;
 }
 

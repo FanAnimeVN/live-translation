@@ -5,6 +5,7 @@ import { createCanvas } from "@napi-rs/canvas";
 import { adoptBalloons, buildRegions, decodeDetections, DETECTOR_INPUT, WEAK_BUBBLE_SCORE, type Box, type Detection, type TextRegion } from "@lt/core";
 import { CTD_WANTED, ctdBlocks } from "./ctd";
 import { env } from "./env";
+import { assertModelAllowed } from "./licenses";
 import type { DecodedPage } from "./image";
 
 /** ogkalu/comic-text-and-bubble-detector, revision 16e8a622f91fabc6b5b65c96d32d1183f8843546, Apache-2.0. */
@@ -14,6 +15,7 @@ let session: Promise<ort.InferenceSession> | undefined;
 
 export function loadDetector(): Promise<ort.InferenceSession> {
   session ??= (async () => {
+    assertModelAllowed("detector");
     const bytes = await readFile(env.detectorModel);
     const sha = createHash("sha256").update(bytes).digest("hex");
     if (sha !== DETECTOR_SHA256) throw new Error(`Detector checksum mismatch (${sha}); refusing to load ${env.detectorModel}`);

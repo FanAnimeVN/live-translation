@@ -107,14 +107,16 @@ export interface PromptInput {
   volatileMemory: string;
   regions: TextRegion[];
   image: { w: number; h: number };
-  /** Page image with outlined, numbered regions. */
-  markedPageDataUrl: string;
+  /** Page image with outlined, numbered regions; omitted when the model reads OCR text only. */
+  markedPageDataUrl?: string;
   /** Optional zoomed crops keyed by region id. */
   crops: Array<{ id: string; dataUrl: string }>;
   /** Faces of characters active in the scene, cropped from pages already read (who is who). */
   castRefs?: Array<{ name: string; ja: string; dataUrl: string }>;
   /** Restrict the request to these ids (bounded repair). */
   onlyIds?: string[];
+  /** "OCR first": the Japanese of each region read by a dedicated crop OCR model, by region id. */
+  preRead?: Record<string, string>;
 }
 
 export function buildUserParts(input: PromptInput): PromptPart[] {
@@ -135,8 +137,8 @@ export function buildUserParts(input: PromptInput): PromptPart[] {
         `STORY MEMORY — recent:\n${input.volatileMemory}\n\n` +
         `REGIONS on this page (box = x1,y1,x2,y2 in 0-1000 page coordinates):\n${manifest}`,
     },
-    { type: "image", dataUrl: input.markedPageDataUrl },
   ];
+  if (input.markedPageDataUrl) parts.push({ type: "image", dataUrl: input.markedPageDataUrl });
   if (input.castRefs?.length) {
     parts.push({ type: "text", text: "Cast references (faces from pages already read; match the people drawn on this page to them):" });
     for (const c of input.castRefs) {
@@ -151,6 +153,15 @@ export function buildUserParts(input: PromptInput): PromptPart[] {
       parts.push({ type: "text", text: c.id });
       parts.push({ type: "image", dataUrl: c.dataUrl });
     }
+  }
+  if (input.preRead) {
+    const lines = regions.map((r) => `${r.id}: ${input.preRead![r.id]?.trim() || "(nothing read)"}`).join("\n");
+    parts.push({
+      type: "text",
+      text: input.markedPageDataUrl
+        ? `Pre-read Japanese text of each region by a dedicated OCR model (may contain mistakes; trust the image when they disagree, and keep ja as what is really written):\n${lines}`
+        : `No page image is attached. The Japanese of each region was read by a dedicated OCR model (it may contain small mistakes: fix only obvious ones, keep ja as written). Decide speakers and listeners from the story memory, the cast references and the dialogue itself; leave them unknown when unclear.\n${lines}`,
+    });
   }
   parts.push({
     type: "text",

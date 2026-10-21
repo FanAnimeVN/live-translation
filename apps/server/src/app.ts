@@ -29,6 +29,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PRIVATE_DIR } from "./env";
 import { judge } from "./judge";
+import { setCookie } from "hono/cookie";
+import { COOKIE, countPage, currentInvite, inviteFor, nsFor, pagesLeft, SHARE, shareGuard } from "./share";
+import { addUpload, findPage, listUploads, MAX_UPLOAD_BYTES, pageBytes } from "./uploads";
 
 const locks = new Map<string, Promise<unknown>>();
 /** Serialize work per series so memory updates never race. */
@@ -40,6 +43,10 @@ function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export const app = new Hono();
+// Share mode: invite cookie, per-invite quota and namespace, only the reader's own uploads (share.ts).
+app.use("*", shareGuard);
+// A page that is not in the dataset (or not this reader's upload) is a 404, not a server error.
+app.onError((e, c) => (/^Unknown page|Trang không còn/.test(e.message) ? c.json({ error: e.message }, 404) : c.json({ error: e.message }, 500)));
 // Blind judging page for the team (local only): /judge
 app.route("/", judge);
 
@@ -67,40 +74,72 @@ app.get("/fonts/:name", async (c) => {
   return f ? c.body(new Uint8Array(f.body), 200, { "Content-Type": f.type }) : c.notFound();
 });
 
-app.get("/api/health", (c) => c.json({ ok: true }));
+app.get("/api/health", (c) => c.json({ ok: true, share: SHARE }));
 
-app.get("/api/models", (c) => c.json({ models: MODELS.filter((m) => !m.hidden), default: DEFAULT_MODEL }));
+// Share mode: a friend enters the invite code once; it is kept in an httpOnly cookie.
+app.post("/api/invite", async (c) => {
+  const { code } = await c.req.json<{ code: string }>();
+  const inv = await inviteFor(code?.trim());
+  if (!inv) return c.json({ error: "Mã mời không đúng" }, 401);
+  setCookie(c, COOKIE, inv.code, { httpOnly: true, sameSite: "Lax", path: "/", maxAge: 60 * 60 * 24 * 60, secure: c.req.header("x-forwarded-proto") === "https" });
+  return c.json({ name: inv.name, pagesLeft: await pagesLeft(inv) });
+});
 
-app.get("/api/budget", async (c) => c.json({ spentUsd: await spentUsd(), limitUsd: env.budgetUsd }));
+/** Models a share-mode reader may pick: the default and the fast one. */
+const SHARE_MODELS = new Set([DEFAULT_MODEL, "deepseek/deepseek-v4.1-flash-1017"]);
+
+app.get("/api/models", (c) => c.json({ models: MODELS.filter((m) => !m.hidden && (!SHARE || SHARE_MODELS.has(m.id))), default: DEFAULT_MODEL }));
+
+app.get("/api/budget", async (c) => {
+  const inv = currentInvite(c);
+  if (inv) return c.json({ share: { name: inv.name, pagesLeft: await pagesLeft(inv), dailyPages: inv.dailyPages } });
+  return c.json({ spentUsd: await spentUsd(), limitUsd: env.budgetUsd });
+});
+
+// A page from the reader's own files (image body; title/chapter/index in the query). RAM only.
+app.post("/api/upload", async (c) => {
+  const bytes = Buffer.from(await c.req.arrayBuffer());
+  if (!bytes.length || bytes.length > MAX_UPLOAD_BYTES) return c.json({ error: "Ảnh rỗng hoặc lớn hơn 12 MB" }, 413);
+  const { title = "", chapter = "1", index = "1" } = c.req.query();
+  try {
+    const p = await addUpload(bytes, { title, chapter: Number(chapter), index: Number(index) }, currentInvite(c)?.code);
+    const { gt, root, ...info } = p;
+    return c.json({ ...info, gtCount: gt.length });
+  } catch {
+    return c.json({ error: "Không đọc được ảnh này" }, 400);
+  }
+});
 
 app.get("/api/pages", async (c) => {
-  const pages = await listPages();
-  return c.json(pages.map(({ gt, ...p }) => ({ ...p, gtCount: gt.length })));
+  const owner = currentInvite(c)?.code;
+  const pages = [...(SHARE ? [] : await listPages()), ...listUploads(owner)];
+  return c.json(pages.map(({ gt, root, ...p }) => ({ ...p, gtCount: gt.length })));
 });
 
 app.get("/api/pages/:id/image", async (c) => {
-  const page = await getPage(c.req.param("id"));
-  const bytes = await readPageImage(page);
+  const page = await findPage(c.req.param("id"), currentInvite(c)?.code, SHARE);
+  const bytes = await pageBytes(page);
   return c.body(new Uint8Array(bytes), 200, { "Content-Type": "image/jpeg", "Cache-Control": "no-store" });
 });
 
-app.get("/api/pages/:id/gt", async (c) => c.json((await getPage(c.req.param("id"))).gt));
+app.get("/api/pages/:id/gt", async (c) => c.json((await findPage(c.req.param("id"))).gt));
 
 app.get("/api/result", async (c) => {
-  const { pageId = "", model = DEFAULT_MODEL, ns = "demo" } = c.req.query();
+  const { pageId = "", model = DEFAULT_MODEL, ns: nsIn } = c.req.query();
+  const ns = nsFor(c, nsIn);
   const t0 = performance.now();
   const r = await loadResult(ns, model, pageId);
   return c.json({ result: r, ms: performance.now() - t0 });
 });
 
 app.get("/api/memory", async (c) => {
-  const { seriesId = "", ns = "demo", title = "" } = c.req.query();
-  return c.json(await loadMemory(ns, seriesId, title));
+  const { seriesId = "", ns: nsIn, title = "" } = c.req.query();
+  return c.json(await loadMemory(nsFor(c, nsIn), seriesId, title));
 });
 
 app.post("/api/memory/entity", async (c) => {
   const body = await c.req.json<{ ns?: string; seriesId: string; ja: string; status: EntryStatus; vi?: string }>();
-  const ns = body.ns ?? "demo";
+  const ns = nsFor(c, body.ns);
   const mem = await serial(`${ns}:${body.seriesId}`, async () => {
     const m = setEntityStatus(await loadMemory(ns, body.seriesId, ""), body.ja, body.status, body.vi);
     await saveMemory(ns, m);
@@ -111,7 +150,8 @@ app.post("/api/memory/entity", async (c) => {
 
 // One-tap cast questions (core/cast.ts): the few uncertain facts that decide pronouns for a series.
 app.get("/api/memory/questions", async (c) => {
-  const { seriesId = "", ns = "demo", chapter = "1", page = "1" } = c.req.query();
+  const { seriesId = "", ns: nsIn, chapter = "1", page = "1" } = c.req.query();
+  const ns = nsFor(c, nsIn);
   const mem = await loadMemory(ns, seriesId, "");
   const pos = { chapter: Number(chapter), page: Number(page) };
   const lines = [...mem.recent, ...(mem.pending ?? [])];
@@ -127,7 +167,7 @@ app.get("/api/memory/questions", async (c) => {
 // the automatic guesses are and, later, improves the defaults. Nothing leaves the machine.
 app.post("/api/memory/answer", async (c) => {
   const body = await c.req.json<{ ns?: string; seriesId: string; question: CastQuestion; answer: CastAnswer; pos: ReadingPosition }>();
-  const ns = body.ns ?? "demo";
+  const ns = nsFor(c, body.ns);
   const mem = await serial(`${ns}:${body.seriesId}`, async () => {
     const before = await loadMemory(ns, body.seriesId, "");
     const m = answerCast(before, body.question, body.answer, body.pos);
@@ -147,7 +187,8 @@ app.post("/api/memory/answer", async (c) => {
 });
 
 app.post("/api/memory/reset", async (c) => {
-  const { ns = "demo", seriesId, title = "" } = await c.req.json<{ ns?: string; seriesId: string; title?: string }>();
+  const { ns: nsIn, seriesId, title = "" } = await c.req.json<{ ns?: string; seriesId: string; title?: string }>();
+  const ns = nsFor(c, nsIn);
   const { emptyMemory } = await import("@lt/core");
   await saveMemory(ns, emptyMemory(seriesId, title));
   return c.json({ ok: true });
@@ -156,8 +197,11 @@ app.post("/api/memory/reset", async (c) => {
 app.post("/api/translate", async (c) => {
   const body = await c.req.json<{ pageId: string; model?: string; ns?: string; crops?: "small" | "all" | "none"; inpaint?: boolean }>();
   const model = body.model || DEFAULT_MODEL;
-  const ns = body.ns ?? "demo";
-  const page = await getPage(body.pageId);
+  const ns = nsFor(c, body.ns);
+  const invite = currentInvite(c);
+  if (invite && !SHARE_MODELS.has(model)) return c.json({ error: "Model này không mở cho bản thử" }, 403);
+  const page = await findPage(body.pageId, invite?.code, SHARE);
+  if (invite && (await pagesLeft(invite)) <= 0) return c.json({ error: "Hết lượt hôm nay", code: "quota" }, 429);
   c.header("Content-Type", "application/x-ndjson; charset=utf-8");
   c.header("Cache-Control", "no-store");
   return stream(c, async (s) => {
@@ -187,12 +231,13 @@ app.post("/api/translate", async (c) => {
       await serial(`${ns}:${page.seriesId}`, async () => {
         const memory = await loadMemory(ns, page.seriesId, page.title);
         const result = await translatePage(
-          { id: page.id, title: page.title, seriesId: page.seriesId, position: page.position, bytes: await readPageImage(page) },
+          { id: page.id, title: page.title, seriesId: page.seriesId, position: page.position, bytes: await pageBytes(page) },
           { model, memory, emit: (e) => void write(e), signal: abort.signal, crops: body.crops, onDetected },
         );
         const merged = mergePage(memory, page.id, page.position, result.notes, Object.values(result.translations));
         await saveMemory(ns, merged.memory);
         await saveResult(ns, result);
+        if (invite) await countPage(invite);
         if ((merged.memory.pending?.length ?? 0) >= UPDATE_EVERY_LINES) void backgroundUpdate(ns, page.seriesId, page.title, false, model);
       });
       // Keep the stream open until the patches are out (they usually finish first).
@@ -221,8 +266,9 @@ function rememberPatches(pageId: string, regions: TextRegion[], patches: PatchDa
 
 // Local reconstruction of art under text (MI-GAN on this machine): no API call, no cost.
 app.post("/api/inpaint", async (c) => {
-  const { pageId, model = DEFAULT_MODEL, ns = "demo", ids } = await c.req.json<{ pageId: string; model?: string; ns?: string; ids: string[] }>();
-  const page = await getPage(pageId);
+  const { pageId, model = DEFAULT_MODEL, ns: nsIn, ids } = await c.req.json<{ pageId: string; model?: string; ns?: string; ids: string[] }>();
+  const ns = nsFor(c, nsIn);
+  const page = await findPage(pageId, currentInvite(c)?.code, SHARE);
   const result = await loadResult(ns, model, pageId);
   const regions = (result?.regions ?? []).filter((r) => ids.includes(r.id));
   if (!regions.length) return c.json({ patches: [], ms: 0 });
@@ -235,7 +281,7 @@ app.post("/api/inpaint", async (c) => {
   const rejected: Rejected[] = [];
   let fresh: PatchData[] = [];
   if (missing.length) {
-    const decoded = await decodeImage(await readPageImage(page));
+    const decoded = await decodeImage(await pageBytes(page));
     fresh = await inpaintRegions(decoded, missing, result ? charSizesFor(result) : {}, rejected, regions);
     rememberPatches(pageId, missing, fresh);
   }
@@ -269,8 +315,8 @@ async function backgroundUpdate(ns: string, seriesId: string, title: string, for
 }
 
 app.post("/api/memory/update", async (c) => {
-  const { ns = "demo", seriesId, title = "" } = await c.req.json<{ ns?: string; seriesId: string; title?: string }>();
-  return c.json((await backgroundUpdate(ns, seriesId, title, true)) ?? { skipped: true });
+  const { ns: nsIn, seriesId, title = "" } = await c.req.json<{ ns?: string; seriesId: string; title?: string }>();
+  return c.json((await backgroundUpdate(nsFor(c, nsIn), seriesId, title, true)) ?? { skipped: true });
 });
 
 // Metadata lookup sends only the series title to AniList; the reader confirms the match.

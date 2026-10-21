@@ -7,8 +7,8 @@
  * Here it is the second detector: manga-image-translator finds text with a segmentation model at
  * 2048 px, and our page detector (640 px) misses small balloons on dark ground, name labels and
  * handwriting. On the 60 GT/team pages its blocks found 17 of the 32 text boxes no region covered,
- * for 0.17 s/page on DirectML. Manga109-s is licensed for academic use only, so the paid cloud tier
- * must run with DETECT_CTD=0 until a detector trained on commercially usable data replaces it.
+ * for 0.17 s/page on DirectML. Its Manga109-s training data allows commercial use of results with the
+ * dataset credited (licenses.ts: "credit"); the paid tier still only runs it while that record allows it.
  */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -18,6 +18,7 @@ import { createCanvas } from "@napi-rs/canvas";
 import type { Box } from "@lt/core";
 import { INPAINT_DEVICE, sessionOptions, type InpaintDevice } from "./device";
 import { ROOT } from "./env";
+import { modelAllowed } from "./licenses";
 import type { DecodedPage } from "./image";
 
 export const CTD_FILE = join(ROOT, "models", "textmask", "comictextdetector.pt.onnx");
@@ -29,7 +30,7 @@ export const CTD_INPUT = 1024;
  * detector), off on CPU only (1.6 s per page, the first bubble would wait for it) unless
  * DETECT_CTD=1; DETECT_CTD=0 always turns it off. A missing model file only logs a warning.
  */
-export const CTD_WANTED = process.env.DETECT_CTD === "1" || (process.env.DETECT_CTD !== "0" && INPAINT_DEVICE !== "cpu");
+export const CTD_WANTED = modelAllowed("comic-text-detector") && (process.env.DETECT_CTD === "1" || (process.env.DETECT_CTD !== "0" && INPAINT_DEVICE !== "cpu"));
 
 /** Block confidence (objectness x class) kept: 0.4 found the most missed text; most extra blocks were real (sound effects). */
 export const CTD_MIN_CONF = 0.4;

@@ -14,7 +14,10 @@
     "server": "npm -w @lt/server run dev",
     "demo": "npm -w @lt/demo run build",
     "eval": "npm -w @lt/eval run eval --",
-    "detect": "npm -w @lt/eval run detect --"
+    "detect": "npm -w @lt/eval run detect --",
+    "share": "npm -w @lt/server run share",
+    "share:invite": "tsx apps/server/src/share-invite.ts",
+    "models:ocr": "tsx tools/setup/fetch-ocr.ts"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

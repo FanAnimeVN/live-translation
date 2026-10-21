@@ -42,6 +42,7 @@ import {
 } from "@lt/core";
 import { detect, detectInCrop } from "./detector";
 import { decodeImage, faceCrop, markedPageDataUrl, regionCrops, type DecodedPage } from "./image";
+import { readRegions } from "./ocr";
 import { mockReply } from "./mock";
 import { streamChat } from "./openrouter";
 import { PRIVATE_DIR } from "./env";
@@ -79,7 +80,25 @@ export interface TranslateOptions {
    * scene (cropped from the box the memory kept). Omitted → no face references.
    */
   refImage?: (pageId: string) => Promise<Buffer | undefined>;
+  /**
+   * How the model gets the text (docs/LOCAL-MODELS.md §1): "image" (it reads the page image, default),
+   * "ocr+image" (a crop OCR reads every region first and the page image is still sent) or "ocr" (OCR text
+   * plus face references only: ~25% cheaper and the first token ~4x sooner on Haiku 5.5, 25 pages) or
+   * "ocr+thumb" (OCR text plus the marked page at 640 px, ~300 image tokens: who is drawn speaking).
+   * Measured 22/10 (Haiku 5.5, 25 pages, 1 run each; docs/LOCAL-MODELS.md §1): ocr+thumb keeps the image
+   * mode's speakers (5% unknown against 35% for OCR text alone) at ~23% lower cost, with lower CER and higher
+   * chrF. Default: READING_MODE in the environment, else "ocr+thumb"; without the OCR model files the page
+   * falls back to image reading.
+   */
+  reading?: ReadingMode;
 }
+
+export type ReadingMode = "image" | "ocr+image" | "ocr+thumb" | "ocr";
+
+/** Long side of the page thumbnail sent with OCR text in "ocr+thumb" reading. */
+const THUMB_SIDE = 640;
+const DEFAULT_READING = (process.env.READING_MODE as ReadingMode | undefined) ?? "ocr+thumb";
+let ocrMissingWarned = false;
 
 /** Face references per request: ~25 image tokens each on Claude at 128 px. */
 const MAX_FACE_REFS = 6;
@@ -118,6 +137,20 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
   const regions = det.regions;
   emit({ type: "detected", pageId: page.id, image: { w: decoded.w, h: decoded.h }, regions, detectMs: det.ms });
   opts.onDetected?.(decoded, regions);
+
+  const reading = opts.reading ?? DEFAULT_READING;
+  const tOcr = performance.now();
+  let preRead: Record<string, string> | undefined;
+  if (reading !== "image" && regions.length && !opts.model.startsWith("mock/")) {
+    try {
+      preRead = await readRegions(decoded, regions);
+    } catch (e) {
+      // No OCR model on this machine (models/ocr/baberu): read from the image as before.
+      if (!ocrMissingWarned) console.warn(`OCR unavailable, reading pages from the image: ${(e as Error).message}`);
+      ocrMissingWarned = true;
+    }
+  }
+  const ocrMs = preRead ? Math.round(performance.now() - tOcr) : undefined;
 
   const translations: Record<string, RegionTranslation> = {};
   const notes: PageNotes = { names: [], address: [], missed: [] };
@@ -161,7 +194,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     const stats = await streamChat({
       model: opts.model,
       system: opts.systemPrompt ?? SYSTEM_PROMPT,
-      parts: await requestParts(page, decoded, regions, opts, onlyIds),
+      parts: await requestParts(page, decoded, regions, opts, onlyIds, preRead, reading),
       purpose: onlyIds ? "repair" : "translate-page",
       pageId: page.id,
       signal: opts.signal,
@@ -219,6 +252,7 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
       detectMs: Math.round(det.ms),
       ttfbMs: ttfbMs === undefined ? undefined : Math.round(ttfbMs),
       firstRegionMs: firstRegionMs === undefined ? undefined : Math.round(firstRegionMs),
+      ...(ocrMs !== undefined ? { ocrMs } : {}),
       totalMs: Math.round(performance.now() - t0),
     },
     usage,
@@ -340,8 +374,10 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     return out;
   }
 
-  async function requestParts(p: PageInput, d: DecodedPage, rs: TextRegion[], o: TranslateOptions, onlyIds?: string[]) {
+  async function requestParts(p: PageInput, d: DecodedPage, rs: TextRegion[], o: TranslateOptions, onlyIds?: string[], preRead?: Record<string, string>, mode: ReadingMode = "image") {
     const cropIds = o.crops === "all" ? rs.map((r) => r.id) : o.crops === "none" ? [] : undefined;
+    const withImage = mode !== "ocr" || !preRead;
+    const thumb = mode === "ocr+thumb" && !!preRead;
     return buildUserParts({
       title: p.title,
       position: p.position,
@@ -349,10 +385,11 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
       volatileMemory: volatileContext(o.memory, p.position, o.context?.volatileTokens, o.context),
       regions: rs,
       image: { w: d.w, h: d.h },
-      markedPageDataUrl: await markedPageDataUrl(d, rs),
-      crops: await regionCrops(d, rs, onlyIds ?? cropIds),
+      markedPageDataUrl: withImage ? await markedPageDataUrl(d, rs, undefined, thumb ? THUMB_SIDE : undefined) : undefined,
+      crops: withImage && !thumb ? await regionCrops(d, rs, onlyIds ?? cropIds) : [],
       castRefs: await faceReferences(p, o),
       onlyIds,
+      preRead,
     });
   }
 }

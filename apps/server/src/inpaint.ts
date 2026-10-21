@@ -10,6 +10,7 @@ import { INPAINT_DEVICE, INPAINT_ENGINE, LAMA_DEVICE, sessionOptions, type Inpai
 import { ROOT } from "./env";
 import type { DecodedPage } from "./image";
 import { CTD_FILE, CTD_INPUT, CTD_SHA256 } from "./ctd";
+import { assertModelAllowed } from "./licenses";
 import { LAMA_MODELS, loadLama, runLama, type LamaVariant } from "./lama";
 import { clearOthers, keepGrey, keepPictures, snapBoxesToPaper, snapToPaper, textColours, wholeBoxes, withNeighbours } from "./redraw";
 
@@ -23,6 +24,7 @@ export function loadInpainter(device: InpaintDevice = INPAINT_DEVICE): Promise<o
   let s = sessions.get(device);
   if (!s) {
     s = (async () => {
+      assertModelAllowed("migan");
       const bytes = await readFile(MIGAN_FILE);
       const sha = createHash("sha256").update(bytes).digest("hex");
       if (sha !== MIGAN_SHA256) throw new Error(`MI-GAN checksum mismatch (${sha})`);
@@ -67,6 +69,7 @@ export function loadTextMasker(model: TextMaskModel = "ctm", device: InpaintDevi
   let s = textMaskers.get(`${model}|${device}`);
   if (!s) {
     s = (async () => {
+      assertModelAllowed(model === "ctm" ? "comic-text-mask" : "comic-text-detector");
       const bytes = await readFile(TEXTMASK_MODELS[model].file);
       const sha = createHash("sha256").update(bytes).digest("hex");
       if (sha !== TEXTMASK_MODELS[model].sha256) throw new Error(`text mask model (${model}) checksum mismatch (${sha})`);
@@ -184,6 +187,7 @@ export function loadAot(device: InpaintDevice = INPAINT_DEVICE): Promise<ort.Inf
   let s = aotSessions.get(device);
   if (!s) {
     s = (async () => {
+      assertModelAllowed("aot");
       const bytes = await readFile(AOT_FILE);
       const sha = createHash("sha256").update(bytes).digest("hex");
       if (sha !== AOT_SHA256) throw new Error(`AOT checksum mismatch (${sha})`);

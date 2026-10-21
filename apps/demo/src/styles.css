@@ -117,3 +117,17 @@ h5 { margin: 10px 0 2px; }
 }
 .ps-note { font-size: 13px; font-style: italic; color: #0f766e; }
 .marker.ps.left .ps-pop { left: 0; right: auto; }
+
+/* Reader: open the reader's own chapter (images, folder, ZIP). */
+.open { display: flex; flex-direction: column; gap: 6px; padding: 4px 2px 10px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.open small { color: var(--muted); line-height: 1.35; }
+label.button { display: block; text-align: center; cursor: pointer; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 10px; }
+label.button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+
+/* Share mode: invite screen. */
+.invite { max-width: 420px; margin: 12vh auto; padding: 0 16px; display: flex; flex-direction: column; gap: 12px; }
+.invite h1 { font-size: 22px; margin: 0; }
+.invite form { display: flex; gap: 8px; }
+.invite input { flex: 1; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: inherit; }
+.invite .error { color: #d14; margin: 0; }
+.invite .fine { color: var(--muted); font-size: 12px; }

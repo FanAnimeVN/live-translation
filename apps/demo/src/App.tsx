@@ -16,7 +16,8 @@ import {
   type TextRegion,
 } from "@lt/core";
 import { drawNotes, LETTERING_FONT, placeNotes, renderTranslation, type Ctx2D, type NotePlacement, type PatchImage, type RegionRender } from "@lt/render";
-import { api, translateStream, type ModelInfo, type PageInfo } from "./api";
+import { api, translateStream, type Budget, type ModelInfo, type PageInfo } from "./api";
+import { collectPages, guessTitle, shrink } from "./files";
 
 type Status = "idle" | "cached" | "detecting" | "translating" | "done" | "error";
 
@@ -66,7 +67,12 @@ export function App() {
   const [selected, setSelected] = useState<string>();
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [memory, setMemory] = useState<SeriesMemory>();
-  const [budget, setBudget] = useState<{ spentUsd: number; limitUsd: number }>();
+  const [budget, setBudget] = useState<Budget>();
+  // Share mode (friends testing through a tunnel): invite first, then only their own chapters.
+  const [share, setShare] = useState(false);
+  const [needInvite, setNeedInvite] = useState(false);
+  const [inviteError, setInviteError] = useState("");
+  const [opening, setOpening] = useState("");
   const [tab, setTab] = useState<"bubbles" | "memory" | "metrics">("bubbles");
   const [fontReady, setFontReady] = useState(0);
   const [busyChapter, setBusyChapter] = useState(false);
@@ -89,7 +95,16 @@ export function App() {
     setStates((all) => ({ ...all, [id]: f(all[id] ?? { regions: [], translations: {}, status: "idle" }) }));
   }, []);
 
-  useEffect(() => {
+  const boot = useCallback(async () => {
+    const health = await api.health();
+    setShare(health.share);
+    try {
+      setBudget(await api.budget());
+    } catch (e) {
+      if ((e as { status?: number }).status === 401) return setNeedInvite(true);
+      throw e;
+    }
+    setNeedInvite(false);
     void api.pages().then((p) => {
       setPages(p);
       setPageId((cur) => cur || p[1]?.id || p[0]?.id || "");
@@ -98,7 +113,10 @@ export function App() {
       setModels(m.models);
       setModel(m.default);
     });
-    void api.budget().then(setBudget);
+  }, []);
+
+  useEffect(() => {
+    void boot();
     const font = new FontFace(LETTERING_FONT, "url(/fonts/PatrickHand-Regular.ttf)");
     void font.load().then((f) => {
       document.fonts.add(f);
@@ -205,6 +223,26 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefetchOn, pageId, model, state.status, busyChapter]);
 
+  const openChapter = async (files: File[]) => {
+    const list = await collectPages(files);
+    if (!list.length) return setOpening("Không thấy ảnh nào (hỗ trợ JPG, PNG, WebP, ZIP)");
+    const title = window.prompt("Tên truyện (để nhớ nhân vật và xưng hô riêng cho bộ này):", guessTitle(files)) ?? "";
+    if (!title.trim()) return setOpening("");
+    const chapter = Number(window.prompt("Chương số:", "1") || "1") || 1;
+    const added: PageInfo[] = [];
+    try {
+      for (const [i, f] of list.entries()) {
+        setOpening(`Đang mở trang ${i + 1}/${list.length}…`);
+        added.push(await api.upload(await shrink(f.blob), { title: title.trim(), chapter, index: i + 1 }));
+      }
+      setOpening(`Đã mở ${added.length} trang. Ảnh chỉ nằm trong bộ nhớ máy chủ, không lưu xuống đĩa.`);
+    } catch (e) {
+      setOpening(`Lỗi khi mở trang: ${(e as Error).message}`);
+    }
+    setPages((all) => [...all, ...added]);
+    if (added[0]) setPageId(added[0].id);
+  };
+
   const modelInfo = models.find((m) => m.id === model);
   const perPage = modelInfo ? estimatePageUsd(modelInfo) : undefined;
 
@@ -268,11 +306,31 @@ export function App() {
     setMemory(await api.answer({ ns: NS, seriesId: page.seriesId, question: q, answer: a, pos: page.position }));
   };
 
+  if (needInvite)
+    return (
+      <div className="invite">
+        <h1>Live translation · bản thử</h1>
+        <p>Dịch manga raw tiếng Nhật sang tiếng Việt ngay trên trang. Nhập mã mời nhóm gửi cho bạn.</p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const code = String(new FormData(e.currentTarget).get("code") ?? "");
+            void api.invite(code).then(boot, (err: Error) => setInviteError(err.message));
+          }}
+        >
+          <input name="code" placeholder="Mã mời" autoFocus />
+          <button className="primary">Vào đọc</button>
+        </form>
+        {inviteError && <p className="error">{inviteError}</p>}
+        <p className="fine">Ảnh bạn mở chỉ nằm trong bộ nhớ máy chủ trong lúc đọc, không lưu lại. Mỗi mã có số trang dịch mỗi ngày.</p>
+      </div>
+    );
+
   return (
     <div className="app">
       <header>
         <div className="brand">
-          <strong>Live translation</strong> <span>Nhật → Việt · demo M0</span>
+          <strong>Live translation</strong> <span>Nhật → Việt · {share ? "bản thử" : "demo M0"}</span>
         </div>
         <label>
           Model{" "}
@@ -310,11 +368,27 @@ export function App() {
           {perPage !== undefined ? ` (~$${perPage.toFixed(4)}/trang)` : ""}
         </label>
         <span className="budget">
-          {budget ? `Đã dùng $${budget.spentUsd.toFixed(4)} / $${budget.limitUsd.toFixed(2)}` : ""}
+          {budget?.share
+            ? `${budget.share.name} · còn ${budget.share.pagesLeft}/${budget.share.dailyPages} trang hôm nay`
+            : budget?.spentUsd !== undefined
+              ? `Đã dùng $${budget.spentUsd.toFixed(4)} / $${(budget.limitUsd ?? 0).toFixed(2)}`
+              : ""}
         </span>
       </header>
 
       <aside className="pages">
+        <div className="open">
+          <label className="button primary">
+            Mở chương (ảnh / ZIP)
+            <input type="file" multiple accept="image/*,.zip" hidden onChange={(e) => void openChapter([...(e.target.files ?? [])])} />
+          </label>
+          <label className="button">
+            Mở thư mục
+            <input type="file" hidden {...({ webkitdirectory: "", directory: "" } as object)} onChange={(e) => void openChapter([...(e.target.files ?? [])])} />
+          </label>
+          {opening && <small>{opening}</small>}
+          {share && !pages.length && <small>Mở một chương raw của bạn để bắt đầu. Ảnh không được lưu lại.</small>}
+        </div>
         {groupBySeries(pages).map(([title, list]) => (
           <div key={title}>
             <h4>{title}</h4>
@@ -322,7 +396,7 @@ export function App() {
               const s = states[p.id]?.status;
               return (
                 <button key={p.id} className={p.id === pageId ? "page on" : "page"} onClick={() => setPageId(p.id)}>
-                  {p.id} <small>tr.{p.position.page}</small>
+                  {p.id.startsWith("up:") ? `Ch.${p.position.chapter} · trang ${p.position.page}` : p.id} <small>tr.{p.position.page}</small>
                   {s && s !== "idle" && <span className={`dot ${s}`} />}
                 </button>
               );
@@ -784,6 +858,7 @@ function statusText(s: PageState): string {
 
 function friendlyError(message: string, code?: string): string {
   if (code === "budget") return "Đã chạm ngân sách thử nghiệm. " + message;
+  if (code === "quota") return "Bạn đã dùng hết số trang hôm nay. Mai quay lại nhé!";
   if (/Key limit exceeded/i.test(message)) return "Key OpenRouter đang bị giới hạn chi tiêu (limit). Nâng limit tại openrouter.ai/settings/keys.";
   if (/429|rate-limit/i.test(message)) return "Model đang bị giới hạn tốc độ (429). Thử lại sau ít phút hoặc chọn model khác.";
   if (/401/.test(message)) return "API key không hợp lệ.";

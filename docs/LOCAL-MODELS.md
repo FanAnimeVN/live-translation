@@ -1,0 +1,129 @@
+# Model local và "OCR trước" — số đo 21–22/10/2026
+
+**Điều kiện chung:**
+- 25 trang đôi của nhóm (Manga109, 5 bộ), 419 dòng có nhãn, 481 vùng do detector tìm (tắt CTD).
+- Prompt v5, mỗi cấu hình **chạy 1 lượt**.
+- Model local chạy trên Kaggle 2×T4 bằng Ollama 0.40.7 (`tools/kaggle/local-models.py`). Model cloud gọi qua OpenRouter (`tools/eval/src/hint-cloud.ts`).
+- Chấm trên máy nhóm bằng `tools/eval/src/kaggle-score.ts`; bản dịch chuẩn không rời máy.
+
+**Cách đọc các chỉ số:**
+- CER: tỉ lệ ký tự Nhật đọc sai. chrF: độ gần với bản dịch chuẩn của nhóm.
+- Bảng 2 chấm theo từng dòng nhãn. Các bảng còn lại chấm theo vùng detector khớp với nhãn. Vì vậy chỉ so các số trong **cùng một bảng**.
+
+## 1a. Pipeline thật của sản phẩm (22/10, `tools/eval/src/bakeoff.ts --reading …`)
+
+**Điều kiện:**
+- Haiku 5.5, 25 trang của nhóm, mỗi chế độ chạy 1 lượt.
+- Có bộ nhớ truyện; các trang trong một bộ chạy lần lượt, trang sau dùng bộ nhớ của trang trước.
+- OCR Baberu chạy trên server: encoder trên GPU qua DirectML, decoder trên CPU.
+- Xưng hô đo bằng `tools/eval/src/pronouns.ts` so với bản dịch chuẩn của nhóm, trên 106 bóng có đại từ.
+- Chế độ `image` là lượt quét ngày 21/10 (`sweep-haiku`).
+
+| Chế độ đọc | Dòng nhãn đúng hết | Đọc sai | chrF | Bóng đầu p50 | Cả trang p50 | $/trang đôi | Xưng hô khớp | Mâu thuẫn xưng hô | Người nói "không rõ" |
+|---|---|---|---|---|---|---|---|---|---|
+| `image` (cũ) | 280/419 | 14,4% | 38,2 | 8,8 s | 14,0 s | 0,00143 | 28,3% | 49,1% | 7% |
+| `ocr` | 293/419 | 12,9% | 40,2 | **5,3 s** | **10,6 s** | **0,00107** | **33,0%** | 45,3% | 35% |
+| `ocr+image` | **303/419** | **12,4%** | 39,7 | 12,6 s | 17,5 s | 0,00141 | 33,0% | **40,6%** | 28% |
+| **`ocr+thumb` (mặc định mới)** | 293/419 | 13,3% | **40,3** | 7,9 s | 13,1 s | 0,00110 | 30,2% | 48,1% | **5%** |
+
+**Đọc kết quả:**
+- **Chỉ gửi chữ OCR** là nhanh và rẻ nhất, xưng hô cũng khớp nhất. Nhưng không thấy tranh thì 35% người nói thành "không rõ", và bộ nhớ truyện mất thông tin để nối nhân vật qua các trang.
+- **Gửi kèm ảnh thu nhỏ 640 px** chỉ tốn thêm ~3% mà người nói trở lại như chế độ ảnh (5% "không rõ"). Chế độ này rẻ hơn chế độ ảnh 23%, đọc chữ đúng hơn, chrF cao hơn.
+- **Vì vậy mặc định là `ocr+thumb`:**
+  - `ocr` dành cho chế độ "nhanh/rẻ";
+  - `image` dành cho máy chưa có model OCR (sản phẩm tự quay về chế độ này).
+- **Mỗi chế độ chỉ chạy một lượt,** nên chênh lệch xưng hô 2–5 điểm có thể là nhiễu. Cần chạy lại 2–3 lượt trước khi đưa vào báo cáo đồ án.
+- **OCR chạy nối tiếp mất 2,7 s/trang trên máy nhóm.** Đưa OCR sang worker thread sẽ rút ngắn thời gian tới bóng đầu.
+
+## 1. Cloud: gửi chữ OCR đọc sẵn cho Claude Haiku 5.5 (gói trang dựng sẵn, không bộ nhớ)
+
+| Cách gửi | CER | chrF | Token đầu p50 | Cả trang p50 | Token vào/ra mỗi trang | $/trang đôi |
+|---|---|---|---|---|---|---|
+| Ảnh (như sản phẩm hiện nay) | 16,2% | 38,6 | 7,3 s | 13,8 s | 7.353 / 1.749 | 0,00135 |
+| Ảnh + chữ OCR (Baberu) | **12,7%** | 40,0 | 6,1 s | 11,7 s | 7.703 / 1.737 | 0,00136 |
+| **Chỉ chữ OCR, không ảnh** | 12,9% | **40,3** | **1,6 s** | **7,4 s** | 4.187 / 1.708 | **0,00101** |
+
+**Đọc kết quả:**
+- **Chỉ gửi chữ OCR:** rẻ hơn 25%, token đầu nhanh hơn 4,5 lần, mà không kém về chữ Nhật lẫn chrF.
+- **Chưa đo:** chrF không đo được ai nói với ai. Bỏ ảnh có thể làm sai người nói và xưng hô. Phải đo bằng nhãn người nói trước khi bỏ ảnh.
+- **Đầu ra vẫn đắt:** ~1.700 token mỗi trang, phần lớn vì model chép lại chữ Nhật. Khi đã có OCR, bỏ phần chép này sẽ giảm thêm chi phí.
+- **Dao động giữa các lượt:** lượt "ảnh" hôm nay đạt CER 16,2% và chrF 38,6, còn lượt quét ngày 21/10 là 14,4% và 38,2. Chênh lệch chừng 1–2 điểm có thể chỉ là nhiễu.
+
+## 2. Dịch chữ Nhật đã có sẵn (OCR hoàn hảo, 419 dòng)
+
+| Cấu hình | chrF | Thời gian/dòng (T4) |
+|---|---|---|
+| Hy-MT2-7B Q6_K, cả trang một lần, các đoạn ngăn bằng dấu phân cách (1/25 trang phải gọi lại từng dòng) | **37,9** | 0,73 s |
+| Gemma 4 12B, cả trang một lần, danh sách đánh số | 37,1 | 0,56 s |
+| Hy-MT2-7B Q6_K, từng dòng, template ngữ cảnh chính thức | 37,1 | 0,75 s |
+| Hy-MT2-7B Q4_K_M, template ngữ cảnh | 36,5 | 0,59 s |
+| MiLMMT-46-12B Q4_K_M, từng dòng | 36,1 | 0,77 s |
+| Hy-MT2-7B Q4_K_M, từng dòng | 36,0 | 0,51 s |
+| Hy-MT2-7B Q8_0, từng dòng | 35,7 | 0,76 s |
+| Hy-MT2-7B Q6_K, từng dòng | 35,3 | 0,86 s |
+| Gemma 4 E4B, cả trang | 34,4 | 0,24 s |
+| TranslateGemma 12B, từng dòng | 30,7 | 0,92 s |
+| Qwen3.5 9B, cả trang | 28,9 | 0,45 s |
+| Qwen3.5 4B, cả trang | 26,7 | 2,65 s |
+| TranslateGemma 4B, từng dòng | 26,3 | 0,26 s |
+
+**Lỗi khi chạy:**
+- Hy-MT2-1.8B bị lặp chữ đến mức Ollama phải dừng.
+- Seed-X-PPO-7B báo lỗi server 500.
+
+**Đối chiếu với lần đo 19/10 (120 dòng, máy nhóm):** khi kèm ngữ cảnh, Hy-MT2-7B chỉ đạt 26,3 vì prompt tự viết. Dùng đúng template chính thức thì lên **37,1**. Haiku khi ấy dịch chữ thuần đạt 38,7.
+
+## 3. OCR cắt từng ô
+
+| Model | CER, cắt theo hộp nhãn | Đúng cả dòng | CER, cắt theo vùng detector | ms/ô (T4) | Giấy phép |
+|---|---|---|---|---|---|
+| **Baberu** | **6,3%** | **80%** | **12,9%** | 151 | Apache-2.0, train trên Manga109-s |
+| CPT-flex | 8,7% | 74% | 13,5% | 8,4 | CC BY-NC-SA (không thương mại) |
+| NAR-small | 8,8% | 75% | 13,5% | 6,8 | CC BY-NC-SA |
+| manga-ocr | 9,2% | 71% | 14,1% | 83 | Apache-2.0, train trên Manga109-s |
+| PaddleOCR-VL-For-Manga | không nạp được (code của repo lỗi `'default'`) | | | | Apache-2.0 |
+
+**Nhận xét:**
+- **Detector là khâu yếu hơn OCR:** cắt theo vùng detector thì CER tăng thêm khoảng 6 điểm, do gom hoặc tách vùng sai.
+- **Số tự công bố cao hơn thực tế:** benchmark của tác giả các model này ghi CER 1,5–5%, nhưng trên nhãn của nhóm là 6–9%. Một phần là vì nhãn của nhóm cũng có lỗi đã biết ([private-ground-truth-audit.md](reference/private-ground-truth-audit.md)).
+
+## 4. Model đọc ảnh chạy local (nguyên trang)
+
+| Model | Vùng dịch được | CER | chrF | Cả trang p50 (T4) |
+|---|---|---|---|---|
+| Gemma 4 E4B + chữ OCR | 445/481 | 22,8% | **33,6** | **14,2 s** |
+| Gemma 4 12B + chữ OCR | 388/481 | 31,1% | 32,1 | 41,1 s |
+| Qwen3.5 4B + chữ OCR | 454/481 | **18,4%** | 27,8 | 285 s (4 token/s, quá chậm) |
+| Qwen3.5 9B + chữ OCR | 396/481 | 32,3% | 25,6 | 31,7 s |
+| Qwen3.5 9B, chỉ ảnh | 393/481 | 45,6% | 23,8 | 32,8 s |
+| Gemma 4 12B, chỉ ảnh | 312/481 | 59,7% | 20,2 | 44,3 s |
+| Gemma 4 E4B, chỉ ảnh | 388/481 | 63,0% | 16,8 | 16,0 s |
+| Qwen3-VL 8B (± chữ OCR) | 88–91/481 | ~80% | ~6 | lỗi ở 15–18/25 trang |
+
+**Nhận xét:**
+- **Gửi kèm chữ OCR luôn tốt hơn:** model local nhìn ảnh vẫn chọn được ai nói, nhưng không tự đọc chữ được.
+
+## 5. Chuỗi hai bước: OCR từng vùng detector, rồi model dịch
+
+| OCR → model dịch | chrF | Thời gian dịch/trang (T4) |
+|---|---|---|
+| CPT-flex → **Gemma 4 12B** (cả trang) | **41,2** | 10,2 s |
+| CPT-flex → Hy-MT2-7B Q6 (từng dòng) | 33,3 | 12,2 s |
+| CPT-flex → Qwen3.5 9B (cả trang) | 31,6 | 8,0 s |
+| CPT-flex → TranslateGemma 12B (từng dòng) | 29,4 | 17,5 s |
+
+## 6. Hướng đề xuất (chờ nhóm chốt)
+
+1. **Cloud chuyển sang "OCR trước":**
+   - Server chạy detector và một OCR có giấy phép thương mại (Baberu hoặc manga-ocr: Apache-2.0, train trên Manga109-s, cần ghi nguồn; nên nhờ người hiểu luật xác nhận), rồi gửi chữ cho Haiku.
+   - **Còn phải đo trước khi chốt:**
+     - độ đúng người nói và xưng hô giữa ba cách gửi;
+     - cách "chữ OCR + ảnh trang thu nhỏ 768 px": vẫn nhìn được nhân vật mà rẻ gần bằng chỉ gửi chữ;
+     - bỏ phần chép lại chữ Nhật ở đầu ra.
+2. **Local:**
+   - **Máy 12–16 GB:** detector → OCR → Gemma 4 12B dịch cả trang (chrF 41,2, ~10 s/trang trên T4).
+   - **Máy 8 GB:** detector → OCR → Hy-MT2-7B Q6_K dịch cả trang có dấu phân cách, hoặc Gemma 4 E4B kèm ảnh và chữ OCR (14 s/trang) nếu cần biết ai nói.
+   - Model đọc ảnh không bao giờ phải tự đọc chữ.
+3. **Train OCR riêng:** đang chạy trên Kaggle (`tools/kaggle/train-ocr.py`).
+   - Đánh giá trên val, OOS và 25 trang của nhóm.
+   - Nhánh học thuật dùng Manga109 đầy đủ, chỉ cho đồ án. Nhánh thương mại chạy lại cùng công thức trên Manga109-s và dữ liệu tổng hợp.

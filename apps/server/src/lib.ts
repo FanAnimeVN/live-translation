@@ -3,7 +3,7 @@ export { listPages, getPage, readPageImage, type DatasetPage, type GtBubble } fr
 export { decodeImage, markedPageDataUrl, regionCrops } from "./image";
 export { streamChat } from "./openrouter";
 export { adoptPageBalloons, detect, detectInCrop, loadDetector } from "./detector";
-export { translatePage } from "./pipeline";
+export { translatePage, type ReadingMode } from "./pipeline";
 export { MODELS, DEFAULT_MODEL, modelInfo } from "./models";
 export { loadMemory, saveMemory } from "./memoryStore";
 export { saveResult, loadResult } from "./results";
@@ -12,3 +12,4 @@ export { INPAINT_DEVICE, INPAINT_ENGINE, type InpaintDevice, type InpaintEngine 
 export { charSizesFor, inpaintRegions, loadInpainter, refineTextBoxes, runMigan, warmInpainters } from "./inpaint";
 export { LAMA_MODELS, loadLama, runLama, type LamaVariant } from "./lama";
 export { applyPlanned, bootstrapFromMetadata, planMemoryUpdate, searchSeries, BACKGROUND_MODEL, UPDATE_EVERY_LINES } from "./context";
+export { assertModelAllowed, creditLines, licenseOf, modelAllowed, MODEL_LICENSES, PAID_TIER, type ModelLicense } from "./licenses";

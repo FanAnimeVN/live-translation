@@ -9,7 +9,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { cer, chrfScore, chrfStats, emptyMemory, mergePage, normalizeJa, percentile, type ChrfStats, type PageResult, type SeriesMemory } from "@lt/core";
-import { listPages, modelInfo, PRIVATE_DIR, readPageImage, spentUsd, translatePage } from "@lt/server";
+import { listPages, modelInfo, PRIVATE_DIR, readPageImage, spentUsd, translatePage, type ReadingMode } from "@lt/server";
 import { matchRegions, validGt } from "./gt";
 
 const arg = (name: string, def: string) => {
@@ -30,6 +30,8 @@ const only = arg("pages", "").split(",").filter(Boolean);
 // --system-file <path>: another page prompt (A/B of prompt versions); --no-recall: skip the recall pass.
 const systemPrompt = arg("system-file", "") ? await readFile(arg("system-file", ""), "utf8") : undefined;
 const recall = !process.argv.includes("--no-recall");
+// --reading image | ocr+image | ocr: how the model gets the text (apps/server/src/pipeline.ts ReadingMode).
+const reading = (arg("reading", "") || undefined) as ReadingMode | undefined;
 const runId = arg("run", new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19));
 const safe = (s: string) => s.replace(/[^a-zA-Z0-9._-]/g, "_");
 const outDir = join(PRIVATE_DIR, "eval", runId);
@@ -78,7 +80,7 @@ for (const model of models) {
       try {
         const result = await translatePage(
           { id: page.id, title: page.title, seriesId: page.seriesId, position: page.position, bytes: await readPageImage(page) },
-          { model, memory, extra, systemPrompt, recall },
+          { model, memory, extra, systemPrompt, recall, reading },
         );
         memories.set(page.seriesId, mergePage(memory, page.id, page.position, result.notes, Object.values(result.translations)).memory);
         if (run === 1) await writeFile(join(dir, `${safe(page.id)}.json`), JSON.stringify(result), "utf8");

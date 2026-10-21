@@ -18,16 +18,43 @@ export interface ModelInfo {
   outUsd: number;
 }
 
+/** Server error with its message shown as is (e.g. "Hết lượt hôm nay"). */
+async function failure(res: Response): Promise<Error> {
+  const text = await res.text();
+  try {
+    return Object.assign(new Error(JSON.parse(text).error ?? text), { status: res.status });
+  } catch {
+    return Object.assign(new Error(`${res.status} ${text}`), { status: res.status });
+  }
+}
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) throw await failure(res);
   return (await res.json()) as T;
 }
 
+export interface Budget {
+  spentUsd?: number;
+  limitUsd?: number;
+  /** Share mode: the invite's name and today's remaining pages. */
+  share?: { name: string; pagesLeft: number; dailyPages: number };
+}
+
 export const api = {
+  health: () => json<{ ok: boolean; share: boolean }>("/api/health"),
+  invite: (code: string) =>
+    json<{ name: string; pagesLeft: number }>("/api/invite", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) }),
+  /** One page of the reader's own chapter; the server keeps the image in memory only. */
+  upload: (blob: Blob, meta: { title: string; chapter: number; index: number }) =>
+    json<PageInfo>(`/api/upload?${new URLSearchParams({ title: meta.title, chapter: String(meta.chapter), index: String(meta.index) })}`, {
+      method: "POST",
+      headers: { "Content-Type": blob.type || "application/octet-stream" },
+      body: blob,
+    }),
   pages: () => json<PageInfo[]>("/api/pages"),
   models: () => json<{ models: ModelInfo[]; default: string }>("/api/models"),
-  budget: () => json<{ spentUsd: number; limitUsd: number }>("/api/budget"),
+  budget: () => json<Budget>("/api/budget"),
   cached: (pageId: string, model: string, ns: string) =>
     json<{ result: PageResult | null; ms: number }>(`/api/result?${new URLSearchParams({ pageId, model, ns })}`),
   memory: (seriesId: string, ns: string, title: string) =>
@@ -62,7 +89,7 @@ export async function translateStream(
     body: JSON.stringify(body),
     signal,
   });
-  if (!res.ok || !res.body) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok || !res.body) throw await failure(res);
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "";
   for (;;) {

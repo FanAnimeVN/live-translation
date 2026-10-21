@@ -10,6 +10,7 @@ import * as ort from "onnxruntime-node";
 import { createCanvas } from "@napi-rs/canvas";
 import type { InpaintJob, RGBAImage } from "@lt/core";
 import { ROOT } from "./env";
+import { assertModelAllowed } from "./licenses";
 import { INPAINT_DEVICE, sessionOptions, type InpaintDevice } from "./device";
 
 export const LAMA_MODELS = {
@@ -41,6 +42,7 @@ export function loadLama(v: LamaVariant = "lama", device: InpaintDevice = INPAIN
   let s = sessions.get(`${v}|${device}`);
   if (!s) {
     s = (async () => {
+      assertModelAllowed(v);
       const bytes = await readFile(LAMA_MODELS[v].file);
       const sha = createHash("sha256").update(bytes).digest("hex");
       if (sha !== LAMA_MODELS[v].sha256) throw new Error(`LaMa (${v}) checksum mismatch (${sha})`);

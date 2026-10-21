@@ -22,8 +22,8 @@ export async function decodeImage(bytes: Buffer): Promise<DecodedPage> {
 const MAX_SIDE = 1568;
 
 /** Page with outlined, numbered regions, downscaled to the model's comfortable size. */
-export async function markedPageDataUrl(page: DecodedPage, regions: TextRegion[], highlight?: string[]): Promise<string> {
-  const scale = Math.min(1, MAX_SIDE / Math.max(page.w, page.h));
+export async function markedPageDataUrl(page: DecodedPage, regions: TextRegion[], highlight?: string[], maxSide = MAX_SIDE): Promise<string> {
+  const scale = Math.min(1, maxSide / Math.max(page.w, page.h));
   const w = Math.round(page.w * scale);
   const h = Math.round(page.h * scale);
   const canvas = createCanvas(w, h);
