@@ -18,7 +18,7 @@ import { env, ROOT } from "./env";
 import { spentUsd } from "./ledger";
 import { loadMemory, saveMemory } from "./memoryStore";
 import { DEFAULT_MODEL, MODELS } from "./models";
-import { translatePage } from "./pipeline";
+import { translatePage, type ReadingMode } from "./pipeline";
 import { decodeImage } from "./image";
 import { charSizesFor, inpaintRegions, type Rejected } from "./inpaint";
 import { predictInpaint } from "@lt/render";
@@ -195,7 +195,7 @@ app.post("/api/memory/reset", async (c) => {
 });
 
 app.post("/api/translate", async (c) => {
-  const body = await c.req.json<{ pageId: string; model?: string; ns?: string; crops?: "small" | "all" | "none"; inpaint?: boolean }>();
+  const body = await c.req.json<{ pageId: string; model?: string; ns?: string; crops?: "small" | "all" | "none"; inpaint?: boolean; reading?: ReadingMode }>();
   const model = body.model || DEFAULT_MODEL;
   const ns = nsFor(c, body.ns);
   const invite = currentInvite(c);
@@ -232,7 +232,7 @@ app.post("/api/translate", async (c) => {
         const memory = await loadMemory(ns, page.seriesId, page.title);
         const result = await translatePage(
           { id: page.id, title: page.title, seriesId: page.seriesId, position: page.position, bytes: await pageBytes(page) },
-          { model, memory, emit: (e) => void write(e), signal: abort.signal, crops: body.crops, onDetected },
+          { model, memory, emit: (e) => void write(e), signal: abort.signal, crops: body.crops, onDetected, reading: body.reading },
         );
         const merged = mergePage(memory, page.id, page.position, result.notes, Object.values(result.translations));
         await saveMemory(ns, merged.memory);

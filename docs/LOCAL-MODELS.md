@@ -25,6 +25,16 @@
 | `ocr` | 293/419 | 12,9% | 40,2 | **5,3 s** | **10,6 s** | **0,00107** | **33,0%** | 45,3% | 35% |
 | `ocr+image` | **303/419** | **12,4%** | 39,7 | 12,6 s | 17,5 s | 0,00141 | 33,0% | **40,6%** | 28% |
 | **`ocr+thumb` (mặc định mới)** | 293/419 | 13,3% | **40,3** | 7,9 s | 13,1 s | 0,00110 | 30,2% | 48,1% | **5%** |
+| `ocr+thumb`, OCR chạy song song trên worker thread (đo lại) | 294/419 | 13,4% | 40,6 | 7,1 s | 12,5 s | 0,00114 | 34,0% | 39,6% | 7% |
+| **DeepSeek V4.1 Flash 1017, `ocr+thumb`** | 293/419 | **12,9%** | **41,0** | **3,2 s** | **7,6 s** | **0,00077** | **39,6%** | **38,7%** | 11% |
+| (đối chiếu) DeepSeek 1017 đọc ảnh, 21/10 | — | 20,5% | 38,5 | 4,2 s | 9,3 s | 0,00109 | — | — | — |
+
+**DeepSeek + OCR:**
+- Nhờ đã có chữ đọc sẵn, DeepSeek đọc đúng ngang Haiku. Nó còn nhanh gấp đôi, rẻ hơn 32% so với Haiku `ocr+thumb` (46% so với Haiku đọc ảnh), và cho chrF cùng độ khớp xưng hô cao nhất.
+- **Chưa đủ để đổi mặc định:** chrF và độ khớp xưng hô không bắt được lỗi sai nghĩa nặng. Ở lần chấm mù trước (30 câu khác nhau nhiều nhất), DeepSeek có 8 lỗi nặng, Haiku có 3.
+- **Đề xuất:**
+  - dùng ngay DeepSeek + OCR cho gói "Nhanh" và cho trang người đọc đang chờ;
+  - đổi mặc định sau khi nhóm chấm mù lại với `ocr+thumb` (`/judge`).
 
 **Đọc kết quả:**
 - **Chỉ gửi chữ OCR** là nhanh và rẻ nhất, xưng hô cũng khớp nhất. Nhưng không thấy tranh thì 35% người nói thành "không rõ", và bộ nhớ truyện mất thông tin để nối nhân vật qua các trang.
@@ -83,8 +93,18 @@
 | manga-ocr | 9,2% | 71% | 14,1% | 83 | Apache-2.0, train trên Manga109-s |
 | PaddleOCR-VL-For-Manga | không nạp được (code của repo lỗi `'default'`) | | | | Apache-2.0 |
 
+**Phần chênh nằm ở đâu** (`tools/eval/src/det-gap.ts`, Baberu, 60 trang, 946 nhãn, tắt CTD):
+
+| Cách detector bao một nhãn | Số nhãn | CER |
+|---|---|---|
+| Một vùng, không dính bóng khác | 863 (91%) | **7,9%** |
+| Bị tách thành nhiều vùng | 13 | 9,6% |
+| Bị gộp với bóng khác | 36 (3,8%) | 134% (phần lớn do cách chấm: chữ bóng kia bị tính vào) |
+| Bị bỏ sót | 34 (3,6%) | 100% |
+
 **Nhận xét:**
-- **Detector là khâu yếu hơn OCR:** cắt theo vùng detector thì CER tăng thêm khoảng 6 điểm, do gom hoặc tách vùng sai.
+- **Detector là khâu yếu hơn OCR, nhưng chỉ ở 3,6% số bóng bị bỏ sót.** Khi detector bao đúng thì OCR gần bằng lúc cắt theo hộp nhãn.
+- **Nên bật lại detector thứ hai (CTD):** đo trước đây cho thấy nó tìm lại được 17/32 ô bị sót. Điều khoản Manga109-s cho dùng thương mại kèm ghi nguồn, nên bảng giấy phép để nó ở mức "credit".
 - **Số tự công bố cao hơn thực tế:** benchmark của tác giả các model này ghi CER 1,5–5%, nhưng trên nhãn của nhóm là 6–9%. Một phần là vì nhãn của nhóm cũng có lỗi đã biết ([private-ground-truth-audit.md](reference/private-ground-truth-audit.md)).
 
 ## 4. Model đọc ảnh chạy local (nguyên trang)
@@ -111,6 +131,31 @@
 | CPT-flex → Hy-MT2-7B Q6 (từng dòng) | 33,3 | 12,2 s |
 | CPT-flex → Qwen3.5 9B (cả trang) | 31,6 | 8,0 s |
 | CPT-flex → TranslateGemma 12B (từng dòng) | 29,4 | 17,5 s |
+
+## 5b. Fine-tune OCR lần đầu: thất bại, đã tìm ra triệu chứng (22/10)
+
+**Thiết lập:**
+- Model gốc `kha-white/manga-ocr-base`, train 2 vòng (5.884 bước, batch 48, lr 5e-5, fp16).
+- Dữ liệu: 141 nghìn ô từ Manga109 bản học thuật, gồm cả ô chữ thoại và ô SFX.
+- Chạy trên Kaggle T4 (`tools/kaggle/train-ocr.py`).
+
+**Kết quả: loss giảm đều nhưng model đọc kém đi nhiều:**
+
+| Tập chấm | CER trước → sau | Đúng cả dòng trước → sau |
+|---|---|---|
+| val, chữ thoại | 7,6% → 49,8% | 69% → 2,7% |
+| val, SFX | 78,3% → 56,0% | 23% → 17% |
+| 25 trang của nhóm | 9,9% → 51,1% | 69% → 4,1% |
+
+**Chẩn đoán** (`tools/kaggle/diag-ocr.py`): model sau train vẫn nhận ra đúng các ký tự nhưng sinh ra sai thứ tự hoặc bỏ sót. Model gốc luôn mở đầu bằng `[CLS]`, còn model sau train thì bỏ token này. Nghi vấn chính có hai:
+1. Ô SFX (29% dữ liệu) thường xoay hoặc uốn cong nhưng chỉ được cắt theo hộp bao thẳng, nên thứ tự ký tự trong ảnh không nhất quán.
+2. Learning rate quá cao làm hỏng decoder.
+
+**Đang chạy thí nghiệm tách hai nghi vấn** (`tools/kaggle/ocr-ablate.py`, 2 GPU song song):
+- chỉ chữ thoại, so với chữ thoại cộng SFX;
+- cả hai dùng lr 2e-5, chấm điểm sau mỗi 500 bước.
+
+**Bài học cho báo cáo:** loss khi train không đủ để đánh giá OCR, phải chấm bằng cách cho model tự sinh chữ trong lúc train. Sản phẩm vẫn dùng Baberu chưa fine-tune.
 
 ## 6. Hướng đề xuất (chờ nhóm chốt)
 

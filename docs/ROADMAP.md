@@ -9,8 +9,16 @@ Tài liệu này gom các quyết định rút ra từ số đo ngày 21–22/10
                                                         ↑ bộ nhớ truyện, thẻ "Ai là ai?", ảnh mặt nhân vật (~2% token)
 ```
 
-**Vì sao "OCR trước" (đo 22/10, Haiku 5.5, 25 trang, mỗi cách 1 lượt):**
-- So với gửi ảnh: rẻ hơn 25%, token đầu nhanh hơn ~4 lần, đọc sai chữ Nhật ít hơn, chrF không kém.
+**Vì sao "OCR trước"** (đo 22/10 trên pipeline thật, 25 trang, mỗi cấu hình 1 lượt; [LOCAL-MODELS.md §1a](LOCAL-MODELS.md)):
+
+| Cấu hình | Đọc sai | chrF | Bóng đầu | $/trang đôi | Xưng hô khớp |
+|---|---|---|---|---|---|
+| Haiku 5.5 đọc ảnh (cũ) | 14,4% | 38,2 | 8,8 s | 0,00143 | 28,3% |
+| Haiku 5.5 + OCR + ảnh thu nhỏ (`ocr+thumb`, mặc định mới) | 13,4% | 40,6 | 7,1 s | 0,00114 | 34,0% |
+| **DeepSeek V4.1 Flash + OCR + ảnh thu nhỏ** | **12,9%** | **41,0** | **3,2 s** | **0,00077** | **39,6%** |
+
+- **Có OCR đọc sẵn, model rẻ và nhanh cũng đọc đúng ngang model đắt.** Lợi thế không còn nằm ở model ngôn ngữ, mà ở OCR, bộ nhớ và luật xưng hô.
+- **Còn phải chấm mù lỗi sai nghĩa nặng trước khi đổi mặc định sang DeepSeek.** Lần chấm trước, DeepSeek có 8 lỗi nặng trên 30 câu, Haiku có 3.
 - Model OCR nhỏ (54–200M tham số) đọc chữ manga ngang hoặc tốt hơn LLM lớn. Model ngôn ngữ chỉ còn việc của nó: dịch, chọn xưng hô, giữ danh xưng.
 - Cùng một pipeline chạy được ở bốn nơi, chỉ khác chỗ chạy từng bước:
 
@@ -60,5 +68,9 @@ Tài liệu này gom các quyết định rút ra từ số đo ngày 21–22/10
 - Chọn **Baberu v1.2** (Apache-2.0, train trên Manga109-s) làm OCR của sản phẩm.
   - Bản TypeScript trong server đạt CER 6,2% trên hộp nhãn và 12,9% trên vùng detector, khớp bản PyTorch (6,3% / 12,9%).
   - Tốc độ 145 ms/ô khi encoder chạy trên GPU qua DirectML.
-- Thêm ba chế độ đọc trang (`READING_MODE` = `image` | `ocr+image` | `ocr`). Mặc định vẫn là `image` cho tới khi có số đo độ đúng xưng hô.
+- Thêm bốn chế độ đọc trang (`READING_MODE` = `image` | `ocr+image` | `ocr+thumb` | `ocr`).
+  - **Mặc định là `ocr+thumb`.** Chế độ này giữ được thông tin người nói (bộ nhớ truyện cần nó) mà vẫn rẻ hơn chế độ ảnh 20–23%.
+  - Máy chưa có model OCR thì sản phẩm tự quay về chế độ ảnh.
+- OCR trong server: encoder chạy trên GPU, decoder chạy trên 4 worker thread. Một trang mất khoảng 1,1 s.
 - Chia dữ liệu lại thành v2 để đo không rò rỉ.
+- **Việc nhóm cần làm:** chấm mù lại Haiku với DeepSeek ở chế độ `ocr+thumb` (`/judge`), rồi mới chốt model mặc định cho gói trả phí.

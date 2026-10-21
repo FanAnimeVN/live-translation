@@ -77,9 +77,12 @@ export const api = {
   imageUrl: (pageId: string) => `/api/pages/${encodeURIComponent(pageId)}/image`,
 };
 
+/** How the model gets the text: OCR + page thumbnail (default), OCR text only (fastest) or the page image. */
+export type ReadingMode = "ocr+thumb" | "ocr" | "image";
+
 /** POST /api/translate and dispatch each NDJSON event as it streams in. */
 export async function translateStream(
-  body: { pageId: string; model: string; ns: string; inpaint?: boolean },
+  body: { pageId: string; model: string; ns: string; inpaint?: boolean; reading?: ReadingMode },
   onEvent: (e: TranslateEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {

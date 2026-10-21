@@ -136,7 +136,6 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
   const det = await detect(decoded);
   const regions = det.regions;
   emit({ type: "detected", pageId: page.id, image: { w: decoded.w, h: decoded.h }, regions, detectMs: det.ms });
-  opts.onDetected?.(decoded, regions);
 
   const reading = opts.reading ?? DEFAULT_READING;
   const tOcr = performance.now();
@@ -151,6 +150,8 @@ export async function translatePage(page: PageInput, opts: TranslateOptions): Pr
     }
   }
   const ocrMs = preRead ? Math.round(performance.now() - tOcr) : undefined;
+  // Work that needs no translation (speculative inpainting) starts now: after the OCR, which shares the GPU.
+  opts.onDetected?.(decoded, regions);
 
   const translations: Record<string, RegionTranslation> = {};
   const notes: PageNotes = { names: [], address: [], missed: [] };

@@ -16,7 +16,7 @@ import {
   type TextRegion,
 } from "@lt/core";
 import { drawNotes, LETTERING_FONT, placeNotes, renderTranslation, type Ctx2D, type NotePlacement, type PatchImage, type RegionRender } from "@lt/render";
-import { api, translateStream, type Budget, type ModelInfo, type PageInfo } from "./api";
+import { api, translateStream, type Budget, type ModelInfo, type PageInfo, type ReadingMode } from "./api";
 import { collectPages, guessTitle, shrink } from "./files";
 
 type Status = "idle" | "cached" | "detecting" | "translating" | "done" | "error";
@@ -84,6 +84,7 @@ export function App() {
   // Translate the next pages ahead of the reader. Opt-in: it spends credits on pages not opened yet.
   const [prefetchOn, setPrefetchOn] = useState(false);
   const [psMode, setPsMode] = useState<PsMode>("subtle");
+  const [reading, setReading] = useState<ReadingMode>("ocr+thumb");
   // One-tap cast questions for the uncertain facts that decide pronouns (answers are locked).
   const [questions, setQuestions] = useState<Array<CastQuestion & { sample: Array<{ speaker: string; to?: string; ja: string; vi: string }> }>>([]);
   const requested = useRef(new Set<string>());
@@ -165,7 +166,7 @@ export function App() {
       patch(p.id, () => ({ regions: [], translations: {}, status: "detecting", live: {} }));
       const t0 = performance.now();
       try {
-        await translateStream({ pageId: p.id, model, ns: NS, inpaint: inpaintOn }, (e) => {
+        await translateStream({ pageId: p.id, model, ns: NS, inpaint: inpaintOn, reading }, (e) => {
           if (e.type === "detected")
             patch(p.id, (s) => ({ ...s, regions: e.regions, status: "translating", live: { detectMs: e.detectMs } }));
           else if (e.type === "region")
@@ -196,7 +197,7 @@ export function App() {
       void api.budget().then(setBudget);
       void api.memory(p.seriesId, NS, p.title).then(setMemory);
     },
-    [model, patch, inpaintOn],
+    [model, patch, inpaintOn, reading],
   );
 
   // Once the open page is ready, translate the next pages of the same chapter one after the
@@ -354,6 +355,14 @@ export function App() {
         </button>
         <label className="toggle">
           <input type="checkbox" checked={inpaintOn} onChange={(e) => setInpaintOn(e.target.checked)} /> Xóa chữ trên tranh (inpaint)
+        </label>
+        <label title="OCR đọc chữ từng bóng trước rồi model chỉ dịch: rẻ hơn ~20–45% và nhanh hơn, đọc chữ Nhật đúng hơn (đo 22/10, docs/LOCAL-MODELS.md).">
+          Cách đọc trang{" "}
+          <select value={reading} onChange={(e) => setReading(e.target.value as ReadingMode)}>
+            <option value="ocr+thumb">OCR + ảnh nhỏ (mặc định)</option>
+            <option value="ocr">Chỉ OCR (nhanh nhất)</option>
+            <option value="image">Model tự đọc ảnh (cũ)</option>
+          </select>
         </label>
         <label title="Khi một câu nhắc lại chuyện cũ, ghi chú P/S chỉ chương/trang để đọc lại. Không bao giờ đè lên tranh; “Xem bản gốc” ẩn tất cả.">
           P/S nhắc chuyện cũ{" "}

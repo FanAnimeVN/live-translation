@@ -21,6 +21,8 @@ work = os.path.join(ROOT, ".private", "kaggle", "upload")
 SLUG_DATA = args[args.index("--data") + 1] if "--data" in args else f"lt-{name}-pack"
 SLUG_KERNEL = args[args.index("--kernel") + 1] if "--kernel" in args else "lt-local-models"
 SCRIPT = args[args.index("--script") + 1] if "--script" in args else "local-models.py"
+# --kernels a,b: other kernels' outputs mounted as inputs (e.g. a trained model to diagnose)
+KERNEL_SOURCES = [x for x in (args[args.index("--kernels") + 1] if "--kernels" in args else "").split(",") if x]
 
 
 def kaggle(*a, capture=True):
@@ -63,7 +65,7 @@ elif cmd == "run":
     shutil.copy(os.path.join(ROOT, "tools", "kaggle", SCRIPT), d)
     json.dump({"id": f"{u}/{SLUG_KERNEL}", "title": SLUG_KERNEL, "code_file": SCRIPT, "language": "python", "kernel_type": "script",
                "is_private": True, "enable_gpu": True, "enable_internet": True, "machine_shape": "NvidiaTeslaT4",
-               "dataset_sources": [f"{u}/{x}" for x in SLUG_DATA.split(",")]}, open(os.path.join(d, "kernel-metadata.json"), "w"))
+               "dataset_sources": [f"{u}/{x}" for x in SLUG_DATA.split(",")], "kernel_sources": [f"{u}/{x}" for x in KERNEL_SOURCES]}, open(os.path.join(d, "kernel-metadata.json"), "w"))
     print(kaggle("kernels", "push", "-p", d))
 
 elif cmd == "status":
